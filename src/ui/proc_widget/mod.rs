@@ -18,7 +18,7 @@ use self::rows::{ProcessRowsParams, draw_rows};
 
 use super::{DetailView, ProcView, WidgetArea};
 
-pub(crate) use layout::visible_row_count;
+pub(crate) use layout::{detail_row_count, visible_row_count};
 
 /// Positions on the process gradient used to colour process state.
 ///
@@ -360,7 +360,7 @@ fn draw_proc_borders(
             total: entry_count,
             armed_name: view.armed_name,
             armed_force: view.armed_force,
-            terminate_disabled: selected_dead,
+            terminate_disabled: view.selected_pid == 0 || selected_dead,
         },
         theme,
     ));
@@ -460,7 +460,7 @@ impl super::Widget for ProcWidget {
 fn selected_pid_from(entries: &[ProcDisplayEntry], selected: usize, procs: &[ProcInfo]) -> u32 {
     entries
         .get(selected)
-        .and_then(|e| procs.get(e.proc_index))
+        .and_then(|e| e.process(procs))
         .map_or(0, |p| p.pid)
 }
 
@@ -504,6 +504,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
             ProcInfo {
                 pid: 200,
@@ -519,6 +520,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
             ProcInfo {
                 pid: 300,
@@ -534,6 +536,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
         ]
     }
@@ -564,6 +567,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             })
             .collect()
     }
@@ -608,6 +612,57 @@ mod tests {
             proc_colors: true,
             base_10: false,
         }
+    }
+
+    #[test]
+    fn grouped_rows_show_count_and_totals_without_actionable_pid() {
+        let mut procs = make_procs();
+        procs.truncate(2);
+        for proc in &mut procs {
+            proc.name = "ChatGPT.exe".into();
+            proc.exe_path =
+                crate::collect::process_groups::normalize_executable_path("C:/Apps/ChatGPT.exe");
+        }
+        let mut entries = crate::collect::process_groups::build_grouped_proc_display_entries(
+            &procs,
+            crate::collect::process_display::ProcSort::Cpu,
+            true,
+            "",
+            &mut std::collections::HashSet::new(),
+            0,
+        );
+        assert_eq!(selected_pid_from(&entries, 0, &procs), 0);
+        assert_eq!(entries[0].cpu_override, Some(17.5));
+        assert_eq!(entries[0].mem_override, Some(150 * 1024 * 1024));
+        let plain = strip_ansi(&draw(
+            &procs,
+            &entries,
+            &make_area(),
+            &Theme::default(),
+            &make_frame(),
+            &make_view(),
+            &CollectStatus::Ok,
+        ));
+        assert!(plain.contains("> ChatGPT (2)"), "{plain}");
+        assert!(plain.contains("17.5"), "{plain}");
+        assert!(
+            !plain.contains("alpha.exe --flag"),
+            "a group must not impersonate a member command"
+        );
+        entries[0].group.as_mut().unwrap().name = "ApplicationFrameHost".into();
+        let plain = strip_ansi(&draw(
+            &procs,
+            &entries,
+            &make_area(),
+            &Theme::default(),
+            &make_frame(),
+            &make_view(),
+            &CollectStatus::Ok,
+        ));
+        assert!(
+            plain.contains("(2)"),
+            "group count must survive truncating a long name"
+        );
     }
 
     #[test]

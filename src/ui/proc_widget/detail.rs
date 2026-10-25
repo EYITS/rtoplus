@@ -549,6 +549,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
             ProcInfo {
                 pid: 200,
@@ -564,6 +565,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
             ProcInfo {
                 pid: 300,
@@ -579,6 +581,7 @@ mod tests {
                 cpu_time: 0,
                 io_read: 0,
                 io_write: 0,
+                ..Default::default()
             },
         ]
     }

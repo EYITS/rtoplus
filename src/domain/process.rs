@@ -1,4 +1,12 @@
 use std::fmt;
+use std::sync::{Arc, OnceLock};
+
+/// Share the unavailable-path sentinel across snapshots instead of allocating
+/// a separate empty Arc for every protected process on every collection.
+pub(crate) fn unknown_executable_path() -> Arc<str> {
+    static EMPTY: OnceLock<Arc<str>> = OnceLock::new();
+    Arc::clone(EMPTY.get_or_init(|| Arc::from("")))
+}
 
 /// Information about a single process.
 #[derive(Debug, Clone)]
@@ -9,6 +17,11 @@ pub struct ProcInfo {
     pub name: String,
     /// Full command line.
     pub cmd: String,
+    /// Normalized executable image path, cached for this process lifetime.
+    /// Empty when Windows denies access; never inferred from the display name.
+    pub exe_path: Arc<str>,
+    /// Process creation FILETIME, or zero when unavailable.
+    pub started_at: u64,
     /// Thread count.
     pub threads: usize,
     /// Username of the process owner.
@@ -37,6 +50,8 @@ impl Default for ProcInfo {
             pid: 0,
             name: String::new(),
             cmd: String::new(),
+            exe_path: unknown_executable_path(),
+            started_at: 0,
             threads: 0,
             user: String::new(),
             mem: 0,
@@ -49,6 +64,25 @@ impl Default for ProcInfo {
             io_write: 0,
         }
     }
+}
+
+/// Stable identity of an application group, independent of its representative PID.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AppGroupKey {
+    Executable(Arc<str>),
+    /// Only used for a verified same-name parent/child chain without an image path.
+    Lineage {
+        pid: u32,
+        started_at: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcGroupSummary {
+    pub key: AppGroupKey,
+    pub count: usize,
+    pub name: String,
+    pub expanded: bool,
 }
 
 /// Display-only metadata for one visible process row.
@@ -64,6 +98,8 @@ pub struct ProcDisplayEntry {
     pub cpu_override: Option<f64>,
     /// Aggregated memory override (used when `proc_aggregate` is on in tree mode).
     pub mem_override: Option<u64>,
+    /// Present only for a synthetic application row. Such a row has no actionable PID.
+    pub group: Option<ProcGroupSummary>,
 }
 
 impl ProcDisplayEntry {
@@ -74,6 +110,7 @@ impl ProcDisplayEntry {
             depth: 0,
             cpu_override: None,
             mem_override: None,
+            group: None,
         }
     }
 
@@ -84,6 +121,17 @@ impl ProcDisplayEntry {
             depth,
             cpu_override: None,
             mem_override: None,
+            group: None,
+        }
+    }
+
+    /// Resolve only an explicitly selected individual process. Display code may
+    /// read `proc_index` for a group's label, but actions must use this method.
+    pub fn process<'a>(&self, procs: &'a [ProcInfo]) -> Option<&'a ProcInfo> {
+        if self.group.is_some() {
+            None
+        } else {
+            procs.get(self.proc_index)
         }
     }
 }
@@ -142,6 +190,23 @@ impl fmt::Display for PriorityClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn synthetic_group_cannot_resolve_an_actionable_process() {
+        let procs = [ProcInfo {
+            pid: 42,
+            ..Default::default()
+        }];
+        let mut entry = ProcDisplayEntry::flat(0);
+        assert_eq!(entry.process(&procs).unwrap().pid, 42);
+        entry.group = Some(ProcGroupSummary {
+            key: AppGroupKey::Executable(Arc::from("c:\\app.exe")),
+            count: 2,
+            name: "app".into(),
+            expanded: false,
+        });
+        assert!(entry.process(&procs).is_none());
+    }
 
     #[test]
     fn proc_state_display_names() {

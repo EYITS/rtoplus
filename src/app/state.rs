@@ -20,7 +20,7 @@
 use crate::app::TerminalSize;
 use crate::config;
 use crate::dirty::RenderDirty;
-use crate::domain::process::{ProcDisplayEntry, ProcInfo};
+use crate::domain::process::{AppGroupKey, ProcDisplayEntry, ProcInfo};
 use crate::domain::widget_kind::WidgetKind;
 use crate::domain::widget_set::WidgetSet;
 use crate::draw;
@@ -193,6 +193,7 @@ impl GpuViewState {
 #[derive(Debug, Clone)]
 pub(crate) struct RuntimeView {
     pub(crate) proc_tree: bool,
+    pub(crate) proc_grouped: bool,
     pub(crate) proc_reversed: bool,
     pub(crate) proc_per_core: bool,
     pub(crate) proc_sorting: crate::collect::process_display::ProcSort,
@@ -209,7 +210,8 @@ impl RuntimeView {
     /// `AppState::new` or after `Config::reload`).
     pub(crate) fn from_config(view: &crate::config::ViewConfig) -> Self {
         Self {
-            proc_tree: view.proc_tree,
+            proc_tree: view.proc_tree && !view.proc_grouped,
+            proc_grouped: view.proc_grouped,
             proc_reversed: view.proc_reversed,
             proc_per_core: view.proc_per_core,
             proc_sorting: view.proc_sorting,
@@ -227,6 +229,7 @@ impl RuntimeView {
     /// values) and before saving.
     pub(crate) fn sync_to_config(&self, view: &mut crate::config::ViewConfig) {
         view.proc_tree = self.proc_tree;
+        view.proc_grouped = self.proc_grouped;
         view.proc_reversed = self.proc_reversed;
         view.proc_per_core = self.proc_per_core;
         view.proc_sorting = self.proc_sorting;
@@ -241,7 +244,8 @@ impl RuntimeView {
     /// Copy `view` into `self`. Called after the user commits an
     /// options-menu edit so the runtime picks up the change.
     pub(crate) fn sync_from_config(&mut self, view: &crate::config::ViewConfig) {
-        self.proc_tree = view.proc_tree;
+        self.proc_tree = view.proc_tree && !view.proc_grouped;
+        self.proc_grouped = view.proc_grouped;
         self.proc_reversed = view.proc_reversed;
         self.proc_per_core = view.proc_per_core;
         self.proc_sorting = view.proc_sorting;
@@ -809,9 +813,16 @@ pub(crate) struct ProcessViewState {
     pub(crate) followed_pid: u32,
     pub(crate) filter_text: String,
     pub(crate) entries: Vec<ProcDisplayEntry>,
+    pub(crate) expanded_groups: HashSet<AppGroupKey>,
+    /// Entries contain indices into this exact snapshot. Input is dispatched
+    /// after live data arrives but before a rebuild, so it must retain this Arc.
+    display_snapshot: Option<Arc<runner::ProcSnapshot>>,
     /// Armed terminate state: (pid, process_name, force_kill).
     /// Set on first `t`/`T`, cleared on second press or any other key.
     pub(crate) armed_terminate: Option<(u32, String, bool)>,
+    /// Creation time captured on the first confirmation press, preventing a
+    /// recycled PID from inheriting an armed termination after a refresh.
+    armed_started_at: Option<u64>,
     /// Pause state for the process list.
     ///
     /// When `Some`, the proc widget renders from `pause.snapshot`
@@ -902,9 +913,50 @@ impl ProcessViewState {
             followed_pid: 0,
             filter_text: String::new(),
             entries: Vec::new(),
+            expanded_groups: HashSet::new(),
+            display_snapshot: None,
             armed_terminate: None,
+            armed_started_at: None,
             pause: None,
         }
+    }
+
+    /// The individual PID under the cursor in the displayed snapshot, never
+    /// an index reinterpreted against a newer live snapshot or a group header.
+    pub(crate) fn selected_process(&self) -> Option<&ProcInfo> {
+        let snapshot = self.display_snapshot.as_ref()?;
+        self.entries.get(self.selected)?.process(&snapshot.procs)
+    }
+
+    pub(crate) fn arm_termination(&mut self, force: bool) {
+        let Some(proc) = self.selected_process() else {
+            return;
+        };
+        let identity = proc.started_at;
+        let target = (proc.pid, proc.name.clone(), force);
+        self.armed_started_at = Some(identity);
+        self.armed_terminate = Some(target);
+    }
+
+    /// Validate the displayed identity against the live snapshot and the first
+    /// confirmation press. No syscall is issued for a vanished or recycled PID.
+    pub(crate) fn termination_target(&self, live: &LiveData) -> Option<&ProcInfo> {
+        let selected = self.selected_process()?;
+        let current = live
+            .proc_data
+            .as_ref()?
+            .procs
+            .iter()
+            .find(|proc| proc.pid == selected.pid)?;
+        if current.started_at != selected.started_at {
+            return None;
+        }
+        if let Some((pid, _, _)) = self.armed_terminate.as_ref()
+            && (*pid != selected.pid || self.armed_started_at != Some(selected.started_at))
+        {
+            return None;
+        }
+        Some(selected)
     }
 
     /// Open the detail panel for `info.pid`, seeding `last_seen`
@@ -1059,15 +1111,16 @@ impl ProcessViewState {
             .is_some_and(|p| p.dead_pids.contains(&pid))
     }
 
-    /// Borrow the slice of processes the current display is built
-    /// from: the paused snapshot when paused, otherwise the live
-    /// snapshot. Returns `None` if no snapshot is available
-    /// (first-frame race, before any data has arrived).
+    /// Borrow the exact snapshot used by the current entries. This also keeps
+    /// a dimmed underlay consistent when background updates ingest new live
+    /// data without rebuilding the displayed process list.
     pub(crate) fn procs_source<'a>(
         &'a self,
         live: &'a LiveData,
     ) -> Option<&'a [crate::domain::process::ProcInfo]> {
-        if let Some(pause) = self.pause.as_ref() {
+        if let Some(snapshot) = self.display_snapshot.as_ref() {
+            Some(snapshot.procs.as_slice())
+        } else if let Some(pause) = self.pause.as_ref() {
             Some(pause.snapshot.procs.as_slice())
         } else {
             live.proc_data.as_ref().map(|s| s.procs.as_slice())
@@ -1085,25 +1138,55 @@ impl ProcessViewState {
         // which conflicts with the mutations to `self.entries` and
         // `self.selected` below. Direct field access lets the
         // borrow checker prove the borrows touch disjoint fields.
-        let procs: &[crate::domain::process::ProcInfo] = match self.pause.as_ref() {
-            Some(p) => p.snapshot.procs.as_slice(),
+        self.display_snapshot = match self.pause.as_ref() {
+            Some(p) => Some(Arc::clone(&p.snapshot)),
             None => match live.proc_data.as_ref() {
-                Some(s) => s.procs.as_slice(),
+                Some(s) => Some(Arc::clone(s)),
                 None => {
                     self.entries.clear();
+                    self.display_snapshot = None;
                     return;
                 }
             },
         };
+        let procs = self.display_snapshot.as_ref().unwrap().procs.as_slice();
 
         let sort_by = view.proc_sorting;
         let reversed = view.proc_reversed;
         let filter = &view.proc_filter;
         let tree_mode = view.proc_tree;
         let aggregate = config.proc.proc_aggregate;
-        self.entries = crate::collect::process_display::build_proc_display_entries(
-            procs, sort_by, reversed, filter, tree_mode, aggregate,
-        );
+        let selected_group = self
+            .entries
+            .get(self.selected)
+            .and_then(|entry| entry.group.as_ref())
+            .map(|group| group.key.clone());
+        self.entries = if view.proc_grouped && !tree_mode {
+            crate::collect::process_groups::build_grouped_proc_display_entries(
+                procs,
+                sort_by,
+                reversed,
+                filter,
+                &mut self.expanded_groups,
+                self.followed_pid,
+            )
+        } else {
+            crate::collect::process_display::build_proc_display_entries(
+                procs, sort_by, reversed, filter, tree_mode, aggregate,
+            )
+        };
+
+        // A synthetic header follows the application's stable identity, even
+        // when aggregate sorting moves it or its representative PID exits.
+        if let Some(key) = selected_group
+            && let Some(index) = self.entries.iter().position(|entry| {
+                entry.group.as_ref().is_some_and(|group| group.key == key)
+                    || matches!(&key, AppGroupKey::Executable(path)
+                        if entry.process(procs).is_some_and(|proc| proc.exe_path == *path))
+            })
+        {
+            self.selected = index;
+        }
 
         // Keep selection on the same row index (btop behavior).
         // Only track by PID when Follow mode is active.
@@ -1116,7 +1199,7 @@ impl ProcessViewState {
         self.selected_pid = self
             .entries
             .get(self.selected)
-            .and_then(|e| procs.get(e.proc_index))
+            .and_then(|e| e.process(procs))
             .map_or(0, |p| p.pid);
 
         // Auto-scroll to followed process. While paused this is
@@ -1129,7 +1212,7 @@ impl ProcessViewState {
             if let Some(idx) = self
                 .entries
                 .iter()
-                .position(|e| procs.get(e.proc_index).is_some_and(|p| p.pid == followed))
+                .position(|e| e.process(procs).is_some_and(|p| p.pid == followed))
             {
                 self.selected = idx;
                 self.selected_pid = followed;
@@ -1220,6 +1303,176 @@ impl NetworkViewState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn grouped_snapshot(procs: &[(u32, &str, f64)]) -> Arc<runner::ProcSnapshot> {
+        Arc::new(runner::ProcSnapshot {
+            procs: procs
+                .iter()
+                .map(|(pid, app, cpu)| ProcInfo {
+                    pid: *pid,
+                    name: format!("{app}.exe"),
+                    exe_path: crate::collect::process_groups::normalize_executable_path(&format!(
+                        "C:/Apps/{app}.exe"
+                    )),
+                    started_at: u64::from(*pid),
+                    cpu_p: *cpu,
+                    ..Default::default()
+                })
+                .collect(),
+            status: crate::collect::CollectStatus::Ok,
+        })
+    }
+
+    #[test]
+    fn selected_group_keeps_identity_when_sort_and_representative_change() {
+        let mut config = config::Config::new();
+        config.view.proc_grouped = true;
+        config.view.proc_reversed = true;
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[
+            (1, "a", 20.0),
+            (2, "a", 10.0),
+            (3, "b", 1.0),
+            (4, "b", 1.0),
+        ]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        let key = state.process.entries[0].group.as_ref().unwrap().key.clone();
+        assert_eq!(
+            state.process.selected_pid, 0,
+            "a group has no actionable PID"
+        );
+        state.live.proc_data = Some(grouped_snapshot(&[
+            (2, "a", 1.0),
+            (5, "a", 1.0),
+            (3, "b", 20.0),
+            (4, "b", 20.0),
+        ]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert_eq!(state.process.selected, 1);
+        assert_eq!(
+            state.process.entries[state.process.selected]
+                .group
+                .as_ref()
+                .unwrap()
+                .key,
+            key
+        );
+        assert_eq!(state.process.selected_pid, 0);
+    }
+
+    #[test]
+    fn grouping_follows_individual_pid_and_preserves_expansion() {
+        let mut config = config::Config::new();
+        config.view.proc_grouped = true;
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[(1, "a", 20.0), (2, "a", 10.0)]));
+        state.process.followed_pid = 2;
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert_eq!(state.process.entries.len(), 3);
+        assert_eq!(state.process.selected_pid, 2);
+        assert!(
+            state.process.entries[state.process.selected]
+                .group
+                .is_none()
+        );
+        assert_eq!(state.process.expanded_groups.len(), 1);
+        state.process.followed_pid = 0;
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert_eq!(state.process.entries.len(), 3);
+    }
+
+    #[test]
+    fn grouped_setting_syncs_and_excludes_tree_on_config_load() {
+        let mut config = config::Config::new();
+        config.view.proc_grouped = true;
+        config.view.proc_tree = true;
+        let mut view = RuntimeView::from_config(&config.view);
+        assert!(view.proc_grouped);
+        assert!(!view.proc_tree);
+        view.sync_to_config(&mut config.view);
+        assert!(config.view.proc_grouped);
+        assert!(!config.view.proc_tree);
+        config.view.proc_grouped = false;
+        config.view.proc_tree = true;
+        view.sync_from_config(&config.view);
+        assert!(!view.proc_grouped);
+        assert!(view.proc_tree);
+    }
+
+    #[test]
+    fn selected_pid_uses_display_snapshot_when_new_live_indices_arrive_before_input() {
+        let config = config::Config::new();
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[(10, "shown", 1.0), (20, "other", 2.0)]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert_eq!(state.process.selected_process().unwrap().pid, 10);
+        // app::run ingests ready snapshots before dispatching keys, and only
+        // rebuilds display entries afterwards. The same raw index now means 30.
+        state.live.proc_data = Some(grouped_snapshot(&[(30, "new", 1.0), (10, "shown", 2.0)]));
+        assert_eq!(state.process.selected_process().unwrap().pid, 10);
+        assert_eq!(state.process.procs_source(&state.live).unwrap()[0].pid, 10);
+        assert_eq!(
+            state.process.termination_target(&state.live).unwrap().pid,
+            10
+        );
+        state.process.arm_termination(false);
+        assert_eq!(state.process.armed_terminate.as_ref().unwrap().0, 10);
+    }
+
+    #[test]
+    fn armed_confirmation_rejects_recycled_pid_before_and_after_display_refresh() {
+        let config = config::Config::new();
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[(10, "old", 1.0)]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        state.process.arm_termination(true);
+        let mut replacement = grouped_snapshot(&[(10, "new", 1.0)]);
+        Arc::make_mut(&mut replacement).procs[0].started_at = 999;
+        state.live.proc_data = Some(replacement);
+        assert!(state.process.termination_target(&state.live).is_none());
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert_eq!(state.process.selected_process().unwrap().started_at, 999);
+        assert!(state.process.termination_target(&state.live).is_none());
+        state.process.armed_terminate = None;
+        state.process.arm_termination(true);
+        assert!(state.process.termination_target(&state.live).is_some());
+    }
+
+    #[test]
+    fn synthetic_group_never_arms_a_pid_and_vanished_selection_is_rejected() {
+        let mut config = config::Config::new();
+        config.view.proc_grouped = true;
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[(1, "app", 1.0), (2, "app", 2.0)]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        state.process.arm_termination(false);
+        assert!(state.process.armed_terminate.is_none());
+        assert!(state.process.termination_target(&state.live).is_none());
+        config.view.proc_grouped = false;
+        state.view.sync_from_config(&config.view);
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        assert!(state.process.selected_process().is_some());
+        state.live.proc_data = Some(grouped_snapshot(&[(99, "unrelated", 1.0)]));
+        assert!(state.process.termination_target(&state.live).is_none());
+    }
 
     #[test]
     fn app_state_initializes_from_config() {

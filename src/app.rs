@@ -7,7 +7,7 @@
 //!
 //! * [`state`] — `AppState` and its sub-structs.
 //! * [`pull`] — drain ready collector slots into `state.live`.
-//! * [`render_gates`] — too-small / waiting-for-data screens.
+//! * [`render_gates`] — waiting-for-data and all-hidden screens.
 //! * [`dirty_exec`] — pre-render normalisation and the per-frame
 //!   ANSI output (`render_all`).
 //! * [`lifecycle`] — input thread, terminal IO, save-on-exit.
@@ -86,9 +86,13 @@ pub fn run(config: &mut config::Config, terminal: &mut term::Terminal, theme: &m
 
         // Process resize before keys — keys may draw overlays that need current dimensions.
         if has_resize {
+            let (_, old_height) = terminal.size();
             let changed = terminal.refresh();
             if changed {
                 let (w, h) = terminal.size();
+                if let crate::overlay::ActiveModal::Options(options) = &mut state.overlay.active {
+                    options.reflow(old_height as usize, h as usize);
+                }
                 tracing::debug!(
                     subsystem = %crate::log::Subsystem::Ui,
                     w,
@@ -103,28 +107,6 @@ pub fn run(config: &mut config::Config, terminal: &mut term::Terminal, theme: &m
         // Always consume slot data into LiveData regardless of overlay state.
         let render_ui = config.ui.background_update || state.overlay.render_ui();
         pull::pull_subsystem_data(&mut state, config, &manager, render_ui, &ready);
-
-        // Required terminal size for the active layout, derived per
-        // frame from the active widget set + hardware-derived hints
-        // (core count, gpu count, disk count, swap, temps, watts).
-        let min_size = crate::draw::layout::min_terminal_size(&crate::draw::layout::LayoutConfig {
-            term_width: size.width,
-            term_height: size.height,
-            root: config.layout_spec().clone(),
-            hints: state.live.layout_hints(config, &state.view, &state.filter),
-            hidden: state.compose_hidden(config),
-        });
-
-        // Handle too-small terminal: render message, only accept quit.
-        if render_gates::is_too_small(size, min_size) {
-            render_gates::render_if_dirty_small(
-                &mut state, config, terminal, theme, size, min_size,
-            );
-            if keys.contains(&input::Key::Char('q')) {
-                break;
-            }
-            continue;
-        }
 
         // Handle waiting for first data: render message, only accept quit.
         if !state.live.is_ready() {

@@ -213,6 +213,7 @@ pub mod gpu_widget;
 pub mod mem_widget;
 pub mod net_widget;
 pub mod proc_widget;
+pub(crate) mod responsive;
 pub mod statusbar_widget;
 
 /// Every widget renderer registered with the central dispatchers.

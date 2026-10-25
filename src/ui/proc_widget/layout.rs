@@ -29,6 +29,18 @@ pub(crate) fn visible_row_count(widget_height: usize, detail_rows: usize) -> usi
     widget_height.saturating_sub(detail_rows + WIDGET_ROW_OVERHEAD)
 }
 
+/// Reserve exactly the detail rows used by the renderer. Shared with
+/// selection/page clamping so the last selected row stays visible.
+pub(crate) fn detail_row_count(width: usize, height: usize, has_detail: bool) -> usize {
+    if has_detail {
+        super::detail::detail_panel_rows(width.saturating_sub(4))
+            .min(MAX_DETAIL_ROWS)
+            .min(height.saturating_sub(DETAIL_OVERHEAD))
+    } else {
+        0
+    }
+}
+
 pub(super) struct ProcColumns {
     pub(super) pid_w: usize,
     pub(super) name_w: usize,
@@ -99,13 +111,7 @@ pub(super) struct ProcWidgetLayout {
 impl ProcWidgetLayout {
     pub(super) fn calculate(area: &WidgetArea, view: &ProcView) -> Self {
         let inner_w = area.width.saturating_sub(4);
-        let detail_rows = if view.detail.is_some() {
-            super::detail::detail_panel_rows(inner_w)
-                .min(MAX_DETAIL_ROWS)
-                .min(area.height.saturating_sub(DETAIL_OVERHEAD))
-        } else {
-            0
-        };
+        let detail_rows = detail_row_count(area.width, area.height, view.detail.is_some());
         let columns = ProcColumns::calculate(inner_w, view.tree_mode);
 
         Self {

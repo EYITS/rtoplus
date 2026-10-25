@@ -1,8 +1,9 @@
-use crate::domain::process::{PriorityClass, ProcInfo, ProcState};
+use crate::domain::process::{PriorityClass, ProcInfo, ProcState, unknown_executable_path};
 use std::{
     collections::{HashMap, HashSet},
     ffi::c_void,
     mem::size_of,
+    sync::Arc,
 };
 use thiserror::Error;
 
@@ -98,6 +99,10 @@ pub struct ProcCollector {
     /// Per-PID kernel + user CPU ticks from the previous cycle.
     /// Used to compute the CPU% delta for the current cycle's window.
     prev_times: HashMap<u32, u64>,
+    /// Image paths are immutable for a process lifetime. Creation time prevents
+    /// a recycled PID from inheriting another application's cached identity.
+    image_paths: HashMap<u32, (u64, Arc<str>)>,
+    image_path_buffer: Vec<u16>,
     last_collect: std::time::Instant,
     core_count: usize,
 }
@@ -108,6 +113,8 @@ impl ProcCollector {
             procs: Vec::new(),
             status: super::CollectStatus::Ok,
             prev_times: HashMap::new(),
+            image_paths: HashMap::new(),
+            image_path_buffer: vec![0; 32_768],
             last_collect: std::time::Instant::now(),
             core_count: 1,
         }
@@ -184,7 +191,14 @@ impl ProcCollector {
                     let ppid = entry.th32ParentProcessID;
                     let threads = entry.cntThreads as usize;
 
-                    let details = get_process_details(pid, &self.prev_times, elapsed, core_count);
+                    let details = get_process_details(
+                        pid,
+                        &self.prev_times,
+                        &mut self.image_paths,
+                        &mut self.image_path_buffer,
+                        elapsed,
+                        core_count,
+                    );
 
                     new_procs.push(ProcInfo {
                         pid,
@@ -194,6 +208,8 @@ impl ProcCollector {
                         } else {
                             details.cmd
                         },
+                        exe_path: details.exe_path,
+                        started_at: details.started_at,
                         threads,
                         user: details.user,
                         mem: details.mem,
@@ -222,6 +238,8 @@ impl ProcCollector {
         for p in &new_procs {
             self.prev_times.insert(p.pid, p.cpu_time);
         }
+        self.image_paths
+            .retain(|pid, _| self.prev_times.contains_key(pid));
 
         self.procs = new_procs;
     }
@@ -386,6 +404,8 @@ struct ProcessDetails {
     priority: PriorityClass,
     user: String,
     cmd: String,
+    exe_path: Arc<str>,
+    started_at: u64,
     /// Cumulative bytes read over the process lifetime, spanning file,
     /// network and device I/O.
     io_read: u64,
@@ -403,6 +423,8 @@ impl Default for ProcessDetails {
             priority: PriorityClass::Normal,
             user: String::new(),
             cmd: String::new(),
+            exe_path: unknown_executable_path(),
+            started_at: 0,
             io_read: 0,
             io_write: 0,
         }
@@ -412,6 +434,8 @@ impl Default for ProcessDetails {
 fn get_process_details(
     pid: u32,
     prev_times: &HashMap<u32, u64>,
+    image_paths: &mut HashMap<u32, (u64, Arc<str>)>,
+    path_buffer: &mut [u16],
     elapsed: f64,
     core_count: usize,
 ) -> ProcessDetails {
@@ -443,6 +467,7 @@ fn get_process_details(
             )
             .is_ok()
             {
+                details.started_at = filetime_to_u64(&creation);
                 let kt = filetime_to_u64(&kernel);
                 let ut = filetime_to_u64(&user_time);
                 details.cpu_time = kt.saturating_add(ut);
@@ -452,6 +477,37 @@ fn get_process_details(
                         process_cpu_percent(prev_total, details.cpu_time, elapsed, core_count);
                 }
             }
+
+            details.exe_path = match image_paths.get(&pid) {
+                Some((started_at, path))
+                    if *started_at == details.started_at && *started_at != 0 =>
+                {
+                    Arc::clone(path)
+                }
+                _ => {
+                    // Reuse the existing handle, and query only on a cache miss.
+                    // Windows executable paths cannot exceed 32,767 UTF-16 units.
+                    let mut len = path_buffer.len() as u32;
+                    let normalized = if QueryFullProcessImageNameW(
+                        handle.get(),
+                        PROCESS_NAME_WIN32,
+                        windows::core::PWSTR(path_buffer.as_mut_ptr()),
+                        &mut len,
+                    )
+                    .is_ok()
+                    {
+                        super::process_groups::normalize_executable_path(&String::from_utf16_lossy(
+                            &path_buffer[..len as usize],
+                        ))
+                    } else {
+                        unknown_executable_path()
+                    };
+                    if details.started_at != 0 {
+                        image_paths.insert(pid, (details.started_at, Arc::clone(&normalized)));
+                    }
+                    normalized
+                }
+            };
 
             use windows::Win32::System::ProcessStatus::*;
             let mut mem_counters = PROCESS_MEMORY_COUNTERS {
@@ -738,6 +794,25 @@ pub fn cpu_percent_from_times(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn executable_identity_is_cached_for_the_process_lifetime() {
+        let mut collector = ProcCollector::new();
+        collector.collect();
+        let pid = std::process::id();
+        let before = collector.procs.iter().find(|proc| proc.pid == pid).unwrap();
+        assert!(!before.exe_path.is_empty());
+        assert!(before.started_at > 0);
+        let path = Arc::clone(&before.exe_path);
+        let started_at = before.started_at;
+        collector.collect();
+        let after = collector.procs.iter().find(|proc| proc.pid == pid).unwrap();
+        assert_eq!(after.started_at, started_at);
+        assert!(
+            Arc::ptr_eq(&path, &after.exe_path),
+            "cached path must avoid repeated allocations"
+        );
+    }
 
     #[test]
     fn cpu_percent_from_times_basic() {

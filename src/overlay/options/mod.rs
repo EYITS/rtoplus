@@ -139,6 +139,27 @@ impl OptionsState {
         self.selected = 0;
     }
 
+    /// Keep the same option selected when terminal height changes the page
+    /// size. An active edit owns its key, so its value stays visible even if
+    /// the old selection indices no longer describe the edited option.
+    pub(crate) fn reflow(&mut self, old_height: usize, new_height: usize) {
+        let Some(category) = render::CATEGORIES.get(self.cat) else {
+            return;
+        };
+        let key = self
+            .edit
+            .as_ref()
+            .map(OptionEditState::key)
+            .or_else(|| opt_key(self.cat, self.page, self.selected, old_height));
+        let Some(index) = key.and_then(|key| category.options.iter().position(|&k| k == key))
+        else {
+            return;
+        };
+        let per_page = render::items_per_page(self.cat, new_height);
+        self.page = index / per_page;
+        self.selected = index % per_page;
+    }
+
     /// Begin an inline edit with `edit` as the initial state.
     /// Replaces any existing edit (caller should normally only call
     /// this when `is_editing()` is `false`).
@@ -451,6 +472,11 @@ pub(crate) fn apply_post_change_effects(key: ConfigKey, ctx: &mut InputContext) 
     // Sync RuntimeView <- config.view if the change touched a
     // runtime-toggle key.
     if is_view_key(key) {
+        if key == ConfigKey::Bool(BoolKey::ProcGrouped) && ctx.config.view.proc_grouped {
+            ctx.config.view.proc_tree = false;
+        } else if key == ConfigKey::Bool(BoolKey::ProcTree) && ctx.config.view.proc_tree {
+            ctx.config.view.proc_grouped = false;
+        }
         ctx.view.sync_from_config(&ctx.config.view);
     }
 
@@ -460,6 +486,7 @@ pub(crate) fn apply_post_change_effects(key: ConfigKey, ctx: &mut InputContext) 
             | ConfigKey::Enum(EnumKey::ProcSorting)
             | ConfigKey::Bool(BoolKey::ProcReversed)
             | ConfigKey::Bool(BoolKey::ProcTree)
+            | ConfigKey::Bool(BoolKey::ProcGrouped)
             | ConfigKey::Bool(BoolKey::ProcAggregate)
             | ConfigKey::Bool(BoolKey::ProcMemBytes)
             | ConfigKey::Bool(BoolKey::ProcColors)
@@ -475,6 +502,7 @@ fn is_view_key(key: ConfigKey) -> bool {
     matches!(
         key,
         ConfigKey::Bool(BoolKey::ProcTree)
+            | ConfigKey::Bool(BoolKey::ProcGrouped)
             | ConfigKey::Bool(BoolKey::ProcReversed)
             | ConfigKey::Bool(BoolKey::ProcPerCore)
             | ConfigKey::Bool(BoolKey::IoMode)
@@ -498,6 +526,55 @@ mod tests {
         assert_eq!(s.return_to(), ReturnTarget::Normal);
         assert!(!s.is_editing());
         assert!(s.edit().is_none());
+    }
+
+    #[test]
+    fn resize_preserves_selected_key_across_tiny_and_full_page_sizes() {
+        let heights = [0, 1, 2, 3, 8, 10, 15, 16, 24, 40, 120];
+        for (cat, category) in render::CATEGORIES.iter().enumerate() {
+            for (index, &key) in category.options.iter().enumerate() {
+                for old_height in heights {
+                    for new_height in heights {
+                        let mut state = OptionsState::new(ReturnTarget::Normal);
+                        state.set_cat(cat, render::CATEGORIES.len());
+                        let old_page_size = render::items_per_page(cat, old_height);
+                        state.set_page(index / old_page_size);
+                        state.set_selected(index % old_page_size);
+                        state.reflow(old_height, new_height);
+                        assert_eq!(
+                            opt_key(cat, state.page(), state.selected(), new_height),
+                            Some(key),
+                            "{key:?}, height {old_height} -> {new_height}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn resize_keeps_active_edit_key_buffer_cursor_and_error() {
+        let mut state = OptionsState::new(ReturnTarget::Normal);
+        let key = ConfigKey::String(StringKey::CustomLayout);
+        let mut edit = OptionEditState::new(key, EditKind::Text, "vstack(cpu, proc)".into());
+        edit.move_left();
+        edit.set_error(Some("validation error"));
+        let cursor = edit.cursor();
+        state.enter_edit(edit);
+        // Deliberately stale selection indices: the editor's key wins.
+        state.set_page(7);
+        state.set_selected(6);
+        for (old_height, new_height) in [(40, 1), (1, 10), (10, 40), (40, 40)] {
+            state.reflow(old_height, new_height);
+            assert_eq!(
+                opt_key(state.cat(), state.page(), state.selected(), new_height),
+                Some(key)
+            );
+            let edit = state.edit().unwrap();
+            assert_eq!(edit.buffer(), "vstack(cpu, proc)");
+            assert_eq!(edit.cursor(), cursor);
+            assert_eq!(edit.error(), Some("validation error"));
+        }
     }
 
     #[test]

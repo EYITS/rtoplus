@@ -97,10 +97,15 @@ impl Terminal {
 
     /// Write content wrapped in terminal sync sequences and flush.
     pub fn write_synced(&self, content: &str) -> io::Result<()> {
+        let content = crate::draw::buffer::clip_to_viewport(
+            content,
+            self.width as usize,
+            self.height as usize,
+        );
         if self.sync_enabled {
             self.write_raw(&format!("{}{}{}", SYNC_START, content, SYNC_END))
         } else {
-            self.write_raw(content)
+            self.write_raw(&content)
         }
     }
 }

@@ -59,13 +59,20 @@ jobs:
         shell: pwsh
         run: |
           $exePath = 'target/x86_64-pc-windows-msvc/release/rtop.exe'
+          $packagePath = 'dist/rtop-windows-x64'
+          New-Item -ItemType Directory -Path $packagePath -Force | Out-Null
           & $exePath --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $defaults = & $exePath --default-config
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $defaults | Set-Content -Encoding utf8 'rtop-default.toml'
+          $defaults | Set-Content -Encoding utf8 "$packagePath/rtop-default.toml"
           $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exePath).Hash.ToLowerInvariant()
-          "$hash  rtop.exe" | Set-Content -Encoding ascii 'rtop.exe.sha256'
+          "$hash  rtop.exe" | Set-Content -Encoding ascii "$packagePath/rtop.exe.sha256"
+          Copy-Item -LiteralPath $exePath -Destination "$packagePath/rtop.exe"
+          Copy-Item -LiteralPath 'LICENSE', 'README.md' -Destination $packagePath
+          if (Test-Path -LiteralPath 'docs/windows-build-tr.md') {
+            Copy-Item -LiteralPath 'docs/windows-build-tr.md' -Destination "$packagePath/KULLANIM.md"
+          }
           @(
             '### Windows executable',
             '',
@@ -80,12 +87,6 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: rtop-windows-x64
-          path: |
-            target/x86_64-pc-windows-msvc/release/rtop.exe
-            rtop.exe.sha256
-            rtop-default.toml
-            LICENSE
-            README.md
-            docs/windows-build-tr.md
+          path: dist/rtop-windows-x64/
           if-no-files-found: error
           retention-days: 30

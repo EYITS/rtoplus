@@ -245,6 +245,7 @@ config_schema! {
         RoundedCorners => "rounded_corners" => ui.rounded_corners,
         ProcReversed => "proc_reversed" => view.proc_reversed,
         ProcTree => "proc_tree" => view.proc_tree,
+        ProcGrouped => "proc_grouped" => view.proc_grouped,
         ProcColors => "proc_colors" => proc.proc_colors,
         ProcPerCore => "proc_per_core" => view.proc_per_core,
         ProcMemBytes => "proc_mem_bytes" => proc.proc_mem_bytes,

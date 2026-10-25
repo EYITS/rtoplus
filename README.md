@@ -76,6 +76,7 @@ The UI design is based on [btop](https://github.com/aristocratos/btop) by aristo
 | `r` | Toggle reverse sort |
 | `f` / `/` | Filter processes |
 | `e` | Toggle tree view |
+| `Shift+E` | Toggle application grouping |
 | `c` | Toggle per-core CPU |
 | `t` | Terminate process (graceful, double-tap) |
 | `Shift+T` | Kill process (force, double-tap) |
@@ -109,6 +110,46 @@ When **vim keys** are enabled (options → general):
 
 See the built-in help menu (`?` / `F1`) for the complete list.
 
+### Application grouping
+
+Press `Shift+E` to group processes by application, or enable `proc_grouped`
+in Options → proc / `rtop.toml`:
+
+```toml
+proc_grouped = true
+```
+
+Groups show the application name, process count, and total CPU and working-set
+memory. Press `Enter` on a group to expand or collapse its individual PIDs;
+press `Enter` on an individual PID to open its existing details panel. Sorting
+by CPU or memory uses group totals. A filter that matches any member keeps the
+whole application visible, so its count and totals remain complete.
+
+Executable paths identify applications, keeping equal names in different
+installations separate. If Windows denies the path, only a verified same-name
+parent/child relationship can join processes; otherwise they stay separate.
+This deliberately favors avoiding incorrect groups. Working-set totals may
+count shared pages more than once and need not match Windows Task Manager.
+
+Group headers cannot be terminated, killed, or followed. Expand a group and
+select an individual PID to use those actions. Following a PID keeps its group
+expanded. `e` still enables the existing process tree; tree view and application
+grouping are alternative views, and the original flat view remains available.
+
+### Small terminal windows
+
+The interface now adapts to the available rows and columns instead of replacing
+the monitor with a minimum-size warning. Panels use compact summaries, smaller
+graphs, and fewer process columns as space decreases. Very narrow or short
+windows temporarily prioritize visible CPU, memory, and process panels.
+Extremely small viewports show only the content that fits.
+
+Resize the terminal larger to restore the selected layout automatically.
+Custom `vstack` / `hstack` expressions, preset selection, hidden widgets, and
+statusbar preferences remain saved as configured. Compact process tables retain
+selection, sorting, filtering, and application expansion; additional columns
+return as width becomes available.
+
 ---
 
 ## Installation
@@ -133,6 +174,19 @@ cargo build --release
 ```
 
 The binary is at `target\release\rtop.exe`.
+
+### Build with GitHub Actions
+
+The **Windows Build** workflow checks formatting, runs Clippy and tests, and
+builds an optimized Windows x64 executable on pushes and pull requests. It can
+also be started from **Actions → Windows Build → Run workflow** once the
+workflow is present on the default branch. Enable Actions in your fork if
+GitHub requests it.
+
+Open a successful run and download the **rtop-windows-x64** artifact. Extract
+the ZIP and use `rtop.exe`; the artifact also includes a SHA256 checksum,
+default configuration, and license. No local Rust installation is required.
+See [the Turkish build and usage guide](docs/windows-build-tr.md).
 
 **Run tests:**
 

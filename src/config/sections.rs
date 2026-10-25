@@ -337,6 +337,7 @@ impl Default for DiskConfig {
 #[serde(default)]
 pub struct ViewConfig {
     pub proc_tree: bool,
+    pub proc_grouped: bool,
     pub proc_reversed: bool,
     pub proc_per_core: bool,
     pub proc_sorting: ProcSort,
@@ -365,6 +366,7 @@ impl Default for ViewConfig {
     fn default() -> Self {
         Self {
             proc_tree: false,
+            proc_grouped: false,
             proc_reversed: false,
             proc_per_core: false,
             proc_sorting: ProcSort::Cpu,
