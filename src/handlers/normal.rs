@@ -144,31 +144,50 @@ pub(super) fn nav_down_action(ctx: &mut InputContext, _: &Key) {
 }
 
 pub(super) fn nav_page_up_action(ctx: &mut InputContext, _: &Key) {
-    let page = ctx.size.height.saturating_sub(10);
+    let page = process_page_rows(ctx);
     ctx.process.selected = ctx.process.selected.saturating_sub(page);
     ctx.render.dirty.mark_proc_widget();
 }
 
 pub(super) fn nav_page_down_action(ctx: &mut InputContext, _: &Key) {
-    let page = ctx.size.height.saturating_sub(10);
+    let page = process_page_rows(ctx);
     let count = ctx.process.entries.len();
     ctx.process.selected = (ctx.process.selected + page).min(count.saturating_sub(1));
     ctx.render.dirty.mark_proc_widget();
 }
 
 pub(super) fn nav_half_page_down_action(ctx: &mut InputContext, _: &Key) {
-    let page = ctx.size.height.saturating_sub(10);
-    let half = page / 2;
+    let half = (process_page_rows(ctx) / 2).max(1);
     let count = ctx.process.entries.len();
     ctx.process.selected = (ctx.process.selected + half).min(count.saturating_sub(1));
     ctx.render.dirty.mark_proc_widget();
 }
 
 pub(super) fn nav_half_page_up_action(ctx: &mut InputContext, _: &Key) {
-    let page = ctx.size.height.saturating_sub(10);
-    let half = page / 2;
+    let half = (process_page_rows(ctx) / 2).max(1);
     ctx.process.selected = ctx.process.selected.saturating_sub(half);
     ctx.render.dirty.mark_proc_widget();
+}
+
+/// Use the same row budget as rendering. A small viewport must still allow
+/// PgUp/PgDn and Vim half-page navigation to move by at least one process.
+fn process_page_rows(ctx: &InputContext<'_>) -> usize {
+    let Some(layout) = ctx.render.cached_layout() else {
+        return 1;
+    };
+    let Some(dim) = layout.dims_for(WidgetKind::Proc) else {
+        return 1;
+    };
+    let has_detail = ctx.process.detail_info().is_some();
+    if layout.is_compact(WidgetKind::Proc) {
+        crate::ui::responsive::process_row_count(dim.height, has_detail)
+    } else {
+        crate::ui::proc_widget::visible_row_count(
+            dim.height,
+            crate::ui::proc_widget::detail_row_count(dim.width, dim.height, has_detail),
+        )
+    }
+    .max(1)
 }
 
 pub(super) fn nav_home_action(ctx: &mut InputContext, _: &Key) {
@@ -190,6 +209,19 @@ pub(super) fn open_filter_action(ctx: &mut InputContext, _: &Key) {
 
 pub(super) fn toggle_tree_action(ctx: &mut InputContext, _: &Key) {
     ctx.view.proc_tree = !ctx.view.proc_tree;
+    if ctx.view.proc_tree {
+        ctx.view.proc_grouped = false;
+    }
+    ctx.process.armed_terminate = None;
+    ctx.render.dirty.mark_proc_data_changed();
+}
+
+pub(super) fn toggle_grouping_action(ctx: &mut InputContext, _: &Key) {
+    ctx.view.proc_grouped = !ctx.view.proc_grouped;
+    if ctx.view.proc_grouped {
+        ctx.view.proc_tree = false;
+    }
+    ctx.process.armed_terminate = None;
     ctx.render.dirty.mark_proc_data_changed();
 }
 
@@ -236,6 +268,9 @@ fn cycle_sort(ctx: &mut InputContext, dir: isize) {
 }
 
 pub(super) fn terminate_action(ctx: &mut InputContext, _: &Key) {
+    if !termination_selection_is_valid(ctx) {
+        return;
+    }
     if let Some((armed_pid, _, false)) = ctx.process.armed_terminate {
         // Defensive: the armed PID may have died during the arm
         // window (live update arrived between the two `t` presses).
@@ -262,7 +297,7 @@ pub(super) fn terminate_action(ctx: &mut InputContext, _: &Key) {
         );
         graceful_terminate(armed_pid);
         ctx.process.armed_terminate = None;
-    } else if let Some((pid, name)) = ctx.selected_proc_info() {
+    } else if let Some((pid, _)) = ctx.selected_proc_info() {
         // Pre-emptive rejection: don't arm on a dead row. The
         // dimmed `terminate` chip on the bottom border is the
         // affordance hint that this action is unavailable.
@@ -275,12 +310,15 @@ pub(super) fn terminate_action(ctx: &mut InputContext, _: &Key) {
             );
             return;
         }
-        ctx.process.armed_terminate = Some((pid, name.to_string(), false));
+        ctx.process.arm_termination(false);
     }
     ctx.render.dirty.mark_proc_widget();
 }
 
 pub(super) fn kill_action(ctx: &mut InputContext, _: &Key) {
+    if !termination_selection_is_valid(ctx) {
+        return;
+    }
     if let Some((armed_pid, _, true)) = ctx.process.armed_terminate {
         if ctx.process.is_dead(armed_pid) {
             tracing::debug!(
@@ -301,7 +339,7 @@ pub(super) fn kill_action(ctx: &mut InputContext, _: &Key) {
         );
         terminate_process(armed_pid);
         ctx.process.armed_terminate = None;
-    } else if let Some((pid, name)) = ctx.selected_proc_info() {
+    } else if let Some((pid, _)) = ctx.selected_proc_info() {
         if ctx.process.is_dead(pid) {
             tracing::debug!(
                 subsystem = %crate::log::Subsystem::Input,
@@ -311,9 +349,21 @@ pub(super) fn kill_action(ctx: &mut InputContext, _: &Key) {
             );
             return;
         }
-        ctx.process.armed_terminate = Some((pid, name.to_string(), true));
+        ctx.process.arm_termination(true);
     }
     ctx.render.dirty.mark_proc_widget();
+}
+
+/// Confirmation must still refer to the explicitly selected individual PID.
+/// A snapshot can move rows between the two key presses without a navigation key.
+fn termination_selection_is_valid(ctx: &mut InputContext<'_>) -> bool {
+    if ctx.process.termination_target(ctx.live).is_none() {
+        ctx.process.armed_terminate = None;
+        ctx.render.dirty.mark_proc_widget();
+        false
+    } else {
+        true
+    }
 }
 
 /// Toggle the proc-list pause state. See `ProcessViewState::pause`
@@ -350,6 +400,20 @@ pub(super) fn detail_action(ctx: &mut InputContext, _: &Key) {
     if ctx.process.selected >= ctx.process.entries.len() {
         return;
     }
+    if let Some(group) = ctx
+        .process
+        .entries
+        .get(ctx.process.selected)
+        .and_then(|entry| entry.group.as_ref())
+    {
+        let key = group.key.clone();
+        if !ctx.process.expanded_groups.remove(&key) {
+            ctx.process.expanded_groups.insert(key);
+        }
+        ctx.process.followed_pid = 0;
+        ctx.render.dirty.mark_proc_data_changed();
+        return;
+    }
     let Some(info) = resolve_selected_proc(ctx) else {
         return;
     };
@@ -364,12 +428,7 @@ pub(super) fn detail_action(ctx: &mut InputContext, _: &Key) {
 /// returned value is owned so the caller can release the immutable
 /// borrow on `ctx.process` before performing mutations.
 fn resolve_selected_proc(ctx: &InputContext<'_>) -> Option<crate::domain::process::ProcInfo> {
-    let procs = ctx.process.procs_source(ctx.live)?;
-    ctx.process
-        .entries
-        .get(ctx.process.selected)
-        .and_then(|entry| procs.get(entry.proc_index))
-        .cloned()
+    ctx.process.selected_process().cloned()
 }
 
 /// Close the process detail panel from anywhere in NORMAL mode.

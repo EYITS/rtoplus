@@ -104,6 +104,7 @@ pub struct LayoutHints {
 #[derive(Debug, Clone, Default)]
 pub struct Layout {
     dims: PerWidget<Option<WidgetDimensions>>,
+    compact: WidgetSet,
 }
 
 impl Layout {
@@ -113,10 +114,14 @@ impl Layout {
         self.dims.get(kind).as_ref()
     }
 
+    /// The slot is too small for its full widget presentation this frame.
+    pub(crate) fn is_compact(&self, kind: WidgetKind) -> bool {
+        self.compact.contains(kind)
+    }
+
     /// `true` when no widget has been placed this frame. The
-    /// engine produces an empty layout in two cases: a degenerate
-    /// terminal size (handled by `app::run`'s `is_too_small`
-    /// gate); or every leaf of the active slot tree is in
+    /// engine produces an empty layout in two cases: a zero-sized
+    /// terminal viewport; or every leaf of the active slot tree is in
     /// `LayoutConfig::hidden`. Callers (currently the
     /// hidden-everything overlay gate in `app::run`) use this to
     /// detect the latter and substitute a help message.
@@ -173,12 +178,17 @@ pub struct LayoutConfig {
 }
 
 /// Calculate widget sizes and positions based on terminal
-/// dimensions and config. Returns an empty layout on degenerate
-/// inputs (term smaller than 2x2).
+/// dimensions and config. A zero-sized viewport has no drawable cells.
+/// Small viewports use a temporary compact arrangement; the configured
+/// slot tree is never changed, so enlargement restores it automatically.
 pub fn calc_sizes(cfg: &LayoutConfig) -> Layout {
     let mut layout = Layout::default();
-    if cfg.term_width < 2 || cfg.term_height < 2 {
+    if cfg.term_width == 0 || cfg.term_height == 0 {
         return layout;
+    }
+    let (comfortable_w, comfortable_h) = min_terminal_size(cfg);
+    if cfg.term_width < comfortable_w.min(60) || cfg.term_height < comfortable_h.min(16) {
+        return compact_layout(cfg);
     }
     let area = Rect {
         x: 0,
@@ -198,9 +208,8 @@ pub fn calc_sizes(cfg: &LayoutConfig) -> Layout {
 /// Smallest terminal size at which the active layout fits without
 /// truncation, given the current slot tree and snapshot hints.
 ///
-/// Returns the `(width, height)` shown in the "Terminal too small.
-/// Need WxH." message, and the value used by the `is_too_small`
-/// gate in the event loop.
+/// These are comfort dimensions, not an execution limit. Smaller
+/// allocations use compact renderers instead of blocking the interface.
 pub fn min_terminal_size(cfg: &LayoutConfig) -> (usize, usize) {
     let ctx = MinCtx {
         hints: &cfg.hints,
@@ -250,25 +259,25 @@ struct MinCtx<'a> {
 }
 
 fn place(slot: &Slot, area: Rect, ctx: &PlaceCtx, layout: &mut Layout) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     match slot {
         Slot::Widget(kind) => {
             if !widget_is_visible(*kind, ctx.hidden) {
                 return;
             }
-            // Apply per-widget width floor. In normal terminals the
-            // floor is below the allocated area width and this is a
-            // no-op; in pathologically narrow allocations the
-            // widget overflows its column rather than truncating
-            // its content.
-            let width = area
-                .width
-                .max(widget_min_width(*kind, ctx.hints, ctx.hidden));
+            if area.width < widget_min_width(*kind, ctx.hints, ctx.hidden)
+                || area.height < widget_min_height(*kind, ctx.hints, ctx.hidden)
+            {
+                layout.compact.insert(*kind);
+            }
             layout.set(
                 *kind,
                 WidgetDimensions {
                     x: area.x,
                     y: area.y,
-                    width,
+                    width: area.width,
                     height: area.height,
                 },
             );
@@ -319,7 +328,6 @@ fn place(slot: &Slot, area: Rect, ctx: &PlaceCtx, layout: &mut Layout) {
 /// child (so the heights sum to exactly `total`).
 fn vstack_distribute_heights(children: &[Slot], ctx: &PlaceCtx, total: usize) -> Vec<usize> {
     let mut heights = vec![0usize; children.len()];
-    let mut sum_preferred = 0usize;
     let mut fill_indices: Vec<usize> = Vec::new();
     for (i, child) in children.iter().enumerate() {
         if !slot_is_visible(child, ctx.hidden) {
@@ -329,18 +337,156 @@ fn vstack_distribute_heights(children: &[Slot], ctx: &PlaceCtx, total: usize) ->
             fill_indices.push(i);
         } else {
             heights[i] = slot_preferred_height(child, ctx);
-            sum_preferred += heights[i];
         }
     }
     if !fill_indices.is_empty() {
+        // Preferred widgets must yield space before they push a process
+        // or network list outside the viewport. Keep at least half of a
+        // constrained stack for Fill children (up to their useful minimum).
+        let fill_floor = fill_indices
+            .iter()
+            .map(|&i| {
+                slot_min_size(
+                    &children[i],
+                    &MinCtx {
+                        hints: ctx.hints,
+                        hidden: ctx.hidden,
+                    },
+                )
+                .1
+            })
+            .sum::<usize>()
+            .min(total / 2);
+        shrink_heights(&mut heights, total.saturating_sub(fill_floor));
+        let sum_preferred: usize = heights.iter().sum();
         let remaining = total.saturating_sub(sum_preferred);
         let per_fill = remaining / fill_indices.len();
         let leftover = remaining % fill_indices.len();
         for (k, &i) in fill_indices.iter().enumerate() {
             heights[i] = per_fill + if k < leftover { 1 } else { 0 };
         }
+    } else {
+        shrink_heights(&mut heights, total);
     }
     heights
+}
+
+/// Preserve preferred sizes whenever they fit. When constrained, scale
+/// within the budget and keep one row per visible preferred child if possible.
+fn shrink_heights(heights: &mut [usize], budget: usize) {
+    let total: usize = heights.iter().sum();
+    if total <= budget {
+        return;
+    }
+    let visible: Vec<usize> = heights
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &h)| (h > 0).then_some(i))
+        .collect();
+    let floor = usize::from(budget >= visible.len());
+    let extra = budget.saturating_sub(floor * visible.len());
+    let weights = total.saturating_sub(floor * visible.len()).max(1);
+    let mut assigned = 0;
+    for &i in &visible {
+        let height = &mut heights[i];
+        *height = floor + height.saturating_sub(floor) * extra / weights;
+        assigned += *height;
+    }
+    for &i in &visible {
+        if assigned == budget {
+            break;
+        }
+        heights[i] += 1;
+        assigned += 1;
+    }
+}
+
+/// Reflow only the visible widgets from the user's tree. CPU, RAM and
+/// the process list take priority; secondary widgets return as rows permit.
+fn compact_layout(cfg: &LayoutConfig) -> Layout {
+    let mut layout = Layout::default();
+    let visible = |kind| cfg.root.contains(kind) && !cfg.hidden.contains(kind);
+    let mut remaining = cfg.term_height;
+    let bar = usize::from(
+        visible(WidgetKind::Statusbar)
+            && (cfg.term_height >= 6
+                || !WidgetKind::all().any(|k| k != WidgetKind::Statusbar && visible(k))),
+    );
+    remaining = remaining.saturating_sub(bar);
+    let mut y = 0;
+    let mut put = |kind, height| {
+        if height == 0 {
+            return;
+        }
+        layout.set(
+            kind,
+            WidgetDimensions {
+                x: 0,
+                y,
+                width: cfg.term_width,
+                height,
+            },
+        );
+        layout.compact.insert(kind);
+        y += height;
+    };
+    if visible(WidgetKind::Proc) {
+        for kind in [WidgetKind::Cpu, WidgetKind::Mem] {
+            if !visible(kind) {
+                continue;
+            }
+            let desired = match kind {
+                WidgetKind::Cpu if cfg.term_height >= 16 => 3,
+                WidgetKind::Cpu if cfg.term_height >= 8 => 2,
+                WidgetKind::Mem if cfg.term_height >= 16 => 2,
+                _ => 1,
+            };
+            let height = desired.min(remaining.saturating_sub(1));
+            put(kind, height);
+            remaining -= height;
+        }
+        for (kind, threshold, desired) in [
+            (WidgetKind::Gpu, 18, 3),
+            (WidgetKind::Net, 26, 2),
+            (WidgetKind::Disk, 26, 2),
+        ] {
+            if visible(kind) && cfg.term_height >= threshold {
+                let height = desired.min(remaining.saturating_sub(cfg.term_height / 2));
+                put(kind, height);
+                remaining -= height;
+            }
+        }
+        put(WidgetKind::Proc, remaining);
+    } else {
+        let kinds = [
+            WidgetKind::Cpu,
+            WidgetKind::Mem,
+            WidgetKind::Gpu,
+            WidgetKind::Net,
+            WidgetKind::Disk,
+        ];
+        let count = kinds.iter().filter(|&&kind| visible(kind)).count();
+        let mut left = count;
+        for kind in kinds.into_iter().filter(|&kind| visible(kind)) {
+            let height = remaining.div_ceil(left);
+            put(kind, height);
+            remaining -= height;
+            left -= 1;
+        }
+    }
+    if bar > 0 {
+        layout.set(
+            WidgetKind::Statusbar,
+            WidgetDimensions {
+                x: 0,
+                y: cfg.term_height - 1,
+                width: cfg.term_width,
+                height: 1,
+            },
+        );
+        layout.compact.insert(WidgetKind::Statusbar);
+    }
+    layout
 }
 
 /// Distribute an HStack's horizontal space across its children
@@ -590,11 +736,127 @@ mod tests {
     }
 
     #[test]
-    fn calc_sizes_returns_empty_layout_for_too_small_terminal() {
+    fn calc_sizes_supports_one_cell_and_only_zero_dimensions_are_empty() {
         let layout = calc_sizes(&lc(1, 30, Slot::Widget(WidgetKind::Proc)));
-        assert!(layout.dims_for(WidgetKind::Proc).is_none());
+        assert_eq!(layout.dims_for(WidgetKind::Proc).unwrap().width, 1);
         let layout = calc_sizes(&lc(100, 1, Slot::Widget(WidgetKind::Proc)));
-        assert!(layout.dims_for(WidgetKind::Proc).is_none());
+        assert_eq!(layout.dims_for(WidgetKind::Proc).unwrap().height, 1);
+        assert!(calc_sizes(&lc(0, 30, Slot::Widget(WidgetKind::Proc))).is_empty());
+        assert!(calc_sizes(&lc(100, 0, Slot::Widget(WidgetKind::Proc))).is_empty());
+    }
+
+    fn assert_bounded(layout: &Layout, width: usize, height: usize) {
+        for kind in WidgetKind::all() {
+            if let Some(dim) = layout.dims_for(kind) {
+                assert!(dim.width > 0 && dim.height > 0, "empty {kind} rectangle");
+                assert!(
+                    dim.x + dim.width <= width,
+                    "{kind} outside {width} columns: {dim:?}"
+                );
+                assert!(
+                    dim.y + dim.height <= height,
+                    "{kind} outside {height} rows: {dim:?}"
+                );
+                for other in WidgetKind::all().filter(|&other| other != kind) {
+                    if let Some(b) = layout.dims_for(other) {
+                        assert!(
+                            dim.x + dim.width <= b.x
+                                || b.x + b.width <= dim.x
+                                || dim.y + dim.height <= b.y
+                                || b.y + b.height <= dim.y,
+                            "overlap: {kind}={dim:?}, {other}={b:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_preset_and_requested_custom_layout_stay_in_bounds_through_resizes() {
+        let mut roots: Vec<Slot> = crate::domain::preset::BuiltinPreset::ALL
+            .into_iter()
+            .map(|p| p.layout_spec())
+            .collect();
+        roots.push(
+            "vstack(hstack(vstack(cpu, gpu), vstack(mem, proc)), statusbar)"
+                .parse()
+                .unwrap(),
+        );
+        let sizes = [
+            (120, 40),
+            (80, 24),
+            (60, 20),
+            (40, 12),
+            (30, 10),
+            (20, 8),
+            (8, 3),
+            (1, 1),
+            (0, 0),
+            (0, 12),
+            (20, 0),
+        ];
+        for root in roots {
+            for cores in [4, 64, 256] {
+                for (width, height) in sizes {
+                    let cfg = lc_with_hints(width, height, root.clone(), |h| {
+                        h.core_count = cores;
+                        h.gpu_count = 2;
+                        h.disk_count = 24;
+                        h.has_swap = true;
+                        h.has_cpu_temp = true;
+                        h.has_cpu_watts = true;
+                    });
+                    let layout = calc_sizes(&cfg);
+                    assert_bounded(&layout, width, height);
+                    if width > 0 && height > 0 && root.contains(WidgetKind::Proc) {
+                        assert!(
+                            layout.dims_for(WidgetKind::Proc).is_some(),
+                            "process list lost at {width}x{height}, {root}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compact_layout_prioritizes_processes_cpu_ram_and_restores_custom_tree() {
+        let root: Slot = "vstack(hstack(vstack(cpu, gpu), vstack(mem, proc)), statusbar)"
+            .parse()
+            .unwrap();
+        let mut cfg = lc_with_hints(120, 40, root.clone(), |h| h.gpu_count = 1);
+        let before = calc_sizes(&cfg);
+        cfg.term_width = 20;
+        cfg.term_height = 8;
+        let small = calc_sizes(&cfg);
+        assert!(small.is_compact(WidgetKind::Proc));
+        for kind in [WidgetKind::Cpu, WidgetKind::Mem, WidgetKind::Proc] {
+            assert!(small.dims_for(kind).is_some());
+        }
+        assert!(small.dims_for(WidgetKind::Gpu).is_none());
+        assert_eq!(small.dims_for(WidgetKind::Proc).unwrap().width, 20);
+        assert_eq!(cfg.root, root);
+        cfg.term_width = 120;
+        cfg.term_height = 40;
+        let after = calc_sizes(&cfg);
+        for kind in WidgetKind::all() {
+            assert_eq!(before.dims_for(kind), after.dims_for(kind));
+        }
+        cfg.hidden.insert(WidgetKind::Mem);
+        cfg.term_width = 20;
+        cfg.term_height = 8;
+        assert!(calc_sizes(&cfg).dims_for(WidgetKind::Mem).is_none());
+    }
+
+    #[test]
+    fn shrinking_preferred_rows_never_allocates_hidden_or_fill_rows() {
+        let mut rows = [100, 0, 50, 0, 10];
+        shrink_heights(&mut rows, 5);
+        assert_eq!(rows.iter().sum::<usize>(), 5);
+        assert_eq!(rows[1], 0);
+        assert_eq!(rows[3], 0);
+        assert!(rows[0] > 0 && rows[2] > 0 && rows[4] > 0);
     }
 
     #[test]

@@ -21,6 +21,7 @@ fn load_empty_file_uses_defaults() {
     assert!(warnings.is_empty());
     assert_eq!(config.refresh.update_ms, 2000);
     assert_eq!(config.ui.color_theme, "default");
+    assert!(!config.view.proc_grouped);
     assert!(config.ui.theme_background);
     let _ = fs::remove_file(&tmp);
 }
@@ -250,6 +251,7 @@ fn write_and_reload_round_trips_cleanly() {
     original.ui.vim_keys = true;
     original.refresh.update_ms = 750;
     original.view.proc_tree = true;
+    original.view.proc_grouped = true;
     original.cpu.show_cpu_freq = false;
     original.view.gpu_iface = "AMD:UDID-deadbeef".to_string();
     original.log.log_level = LevelFilter::DEBUG;
@@ -265,6 +267,7 @@ fn write_and_reload_round_trips_cleanly() {
     assert!(loaded.ui.vim_keys);
     assert_eq!(loaded.refresh.update_ms, 750);
     assert!(loaded.view.proc_tree);
+    assert!(loaded.view.proc_grouped);
     assert!(!loaded.cpu.show_cpu_freq);
     assert_eq!(loaded.view.gpu_iface, "AMD:UDID-deadbeef");
     assert_eq!(loaded.log.log_level, LevelFilter::DEBUG);

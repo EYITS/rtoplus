@@ -239,6 +239,12 @@ pub(crate) static BINDINGS: &[Binding] = &[
         action: normal::toggle_tree_action,
     },
     Binding {
+        keys: &[KeySpec::Always(Key::Char('E'))],
+        states: NORMAL,
+        help: Some(HelpEntry { category: "Process", keys: "Shift+E", description: "Toggle application grouping" }),
+        action: normal::toggle_grouping_action,
+    },
+    Binding {
         keys: &[KeySpec::Always(Key::Char('c'))],
         states: NORMAL,
         help: Some(HelpEntry { category: "Process", keys: "c", description: "Toggle per-core CPU" }),
@@ -259,7 +265,7 @@ pub(crate) static BINDINGS: &[Binding] = &[
     Binding {
         keys: &[KeySpec::Always(Key::Enter)],
         states: NORMAL,
-        help: Some(HelpEntry { category: "Process", keys: "Enter", description: "Show/hide process details" }),
+        help: Some(HelpEntry { category: "Process", keys: "Enter", description: "Expand group / show process details" }),
         action: normal::detail_action,
     },
     Binding {

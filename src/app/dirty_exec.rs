@@ -49,15 +49,23 @@ pub(crate) fn execute_dirty_work(
     if let Some(layout) = state.render.cached_layout()
         && let Some(proc_dim) = layout.dims_for(crate::domain::widget_kind::WidgetKind::Proc)
     {
-        let detail_rows = if state.process.detail_info().is_some() {
-            8_usize.min(proc_dim.height.saturating_sub(6))
+        let compact = layout.is_compact(crate::domain::widget_kind::WidgetKind::Proc);
+        let detail_rows = if !compact && state.process.detail_info().is_some() {
+            ui::proc_widget::detail_row_count(proc_dim.width, proc_dim.height, true)
         } else {
             0
         };
-        clamp_proc_selection(
+        let max_visible = if compact {
+            ui::responsive::process_row_count(
+                proc_dim.height,
+                state.process.detail_info().is_some(),
+            )
+        } else {
+            ui::proc_widget::visible_row_count(proc_dim.height, detail_rows)
+        };
+        clamp_selection_to_rows(
             state.process.entries.len(),
-            proc_dim.height,
-            detail_rows,
+            max_visible,
             &mut state.process.selected,
             &mut state.process.start,
         );
@@ -290,14 +298,12 @@ fn render_dirty_frame(
     output
 }
 
-fn clamp_proc_selection(
+fn clamp_selection_to_rows(
     count: usize,
-    widget_height: usize,
-    detail_rows: usize,
+    max_visible: usize,
     selected: &mut usize,
     start: &mut usize,
 ) {
-    let max_visible = ui::proc_widget::visible_row_count(widget_height, detail_rows);
     if count == 0 {
         *selected = 0;
         *start = 0;
@@ -506,7 +512,13 @@ pub(crate) fn render_all(params: &RenderParams) -> String {
     let mut output = String::new();
     for widget in ui::WIDGETS {
         if widget.is_dirty(&params.dirty) {
-            widget.render(params, &mut output);
+            for &kind in widget.kinds() {
+                if params.layout.is_compact(kind) {
+                    ui::responsive::render(kind, params, &mut output);
+                } else {
+                    widget.render(params, &mut output);
+                }
+            }
         }
     }
     output
@@ -524,7 +536,7 @@ mod tests {
         let mut selected = 3;
         let mut start = 0;
 
-        clamp_proc_selection(10, 8, 0, &mut selected, &mut start);
+        clamp_selection_to_rows(10, 4, &mut selected, &mut start);
 
         assert_eq!(selected, 3);
         assert_eq!(start, 0);
@@ -552,6 +564,273 @@ mod tests {
     fn make_state() -> AppState {
         let config = config::Config::new();
         AppState::new(&config)
+    }
+
+    fn responsive_fixture(config: &config::Config) -> AppState {
+        let mut state = AppState::new(config);
+        state.live.core_count = 4;
+        state.live.total_mem = 16 * 1024 * 1024 * 1024;
+        let mut cpu = crate::domain::cpu::CpuInfo {
+            core_count: 4,
+            cpu_name: "Test CPU".into(),
+            ..Default::default()
+        };
+        cpu.cpu_percent.total = [10, 20, 40, 30].into();
+        cpu.core_percent = vec![[20, 40, 30].into(); 4];
+        state.live.cpu = Some(Arc::new(runner::CpuSnapshot {
+            info: cpu,
+            status: CollectStatus::Ok,
+        }));
+        let mut mem = crate::domain::memory::MemInfo::default();
+        mem.stats.used = state.live.total_mem / 2;
+        mem.stats.available = state.live.total_mem / 2;
+        mem.stats.swap_total = state.live.total_mem;
+        mem.percent.used.push_back(50);
+        state.live.mem = Some(Arc::new(runner::MemSnapshot {
+            info: mem,
+            status: CollectStatus::Ok,
+        }));
+        let mut gpu = crate::domain::gpu::GpuInfo {
+            stable_id: "TEST:gpu".into(),
+            name: "Test GPU".into(),
+            ..Default::default()
+        };
+        gpu.gpu_percent.utilization.push_back(25);
+        state.live.gpu = Some(Arc::new(runner::GpuSnapshot {
+            devices: vec![gpu],
+            status: CollectStatus::Ok,
+        }));
+        state.live.disk = Some(Arc::new(runner::DiskSnapshot {
+            info: crate::domain::disk::DiskData {
+                disks: vec![crate::domain::disk::DiskInfo {
+                    name: "C:".into(),
+                    total: 1000,
+                    used: 500,
+                    used_percent: 50,
+                    ..Default::default()
+                }],
+            },
+            status: CollectStatus::Ok,
+        }));
+        state.live.net = Some(Arc::new(runner::NetSnapshot {
+            nets: vec![crate::domain::network::NetInfo {
+                stable_id: "TEST:net".into(),
+                description: "Test NIC".into(),
+                ..Default::default()
+            }],
+            status: CollectStatus::Ok,
+        }));
+        state.live.proc_data = Some(Arc::new(runner::ProcSnapshot {
+            procs: (1..=16)
+                .map(|pid| ProcInfo {
+                    pid,
+                    name: if pid < 3 {
+                        "ChatGPT.exe".into()
+                    } else {
+                        format!("程序{pid}.exe")
+                    },
+                    cmd: format!("test.exe --pid={pid}"),
+                    exe_path: if pid < 3 {
+                        Arc::from("c:\\apps\\chatgpt.exe")
+                    } else {
+                        Arc::from(format!("c:\\apps\\test{pid}.exe"))
+                    },
+                    cpu_p: 20.0,
+                    mem: 1024 * 1024 * 100,
+                    ..Default::default()
+                })
+                .collect(),
+            status: CollectStatus::Ok,
+        }));
+        state
+    }
+
+    /// Independent ANSI output check: every cursor target and printable
+    /// cell must remain in the terminal after the final viewport clip.
+    fn assert_frame_bounds(frame: &str, width: usize, height: usize) -> usize {
+        let mut tail = frame;
+        let (mut x, mut y) = (1, 1);
+        let mut cells = 0;
+        while !tail.is_empty() {
+            if tail.starts_with("\x1b[") {
+                let end = tail[2..].find(|c: char| ('@'..='~').contains(&c)).unwrap() + 3;
+                if tail.as_bytes()[end - 1] == b'H' {
+                    let values: Vec<usize> = tail[2..end - 1]
+                        .split(';')
+                        .map(|s| s.parse().unwrap())
+                        .collect();
+                    y = values[0];
+                    x = values[1];
+                    assert!(
+                        x > 0 && x <= width && y > 0 && y <= height,
+                        "cursor outside {width}x{height}: {x},{y}"
+                    );
+                }
+                tail = &tail[end..];
+            } else {
+                let ch = tail.chars().next().unwrap();
+                let glyph_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+                if glyph_width > 0 {
+                    assert!(
+                        y <= height && x + glyph_width - 1 <= width,
+                        "text wraps outside {width}x{height}: {x},{y}, {ch}"
+                    );
+                    cells += glyph_width;
+                    x += glyph_width;
+                }
+                tail = &tail[ch.len_utf8()..];
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn full_render_presets_and_custom_layout_survive_requested_sizes_and_tiny_overlays() {
+        let theme = theme::Theme::new();
+        let mut roots: Vec<_> = crate::domain::preset::BuiltinPreset::ALL
+            .into_iter()
+            .map(|p| p.layout_spec())
+            .collect();
+        roots.push(
+            "vstack(hstack(vstack(cpu, gpu), vstack(mem, proc)), statusbar)"
+                .parse()
+                .unwrap(),
+        );
+        for root in roots {
+            for grouped in [false, true] {
+                let mut config = config::Config::new();
+                config.layout.set_custom(root.clone());
+                config.set_active_preset(crate::domain::preset::ActivePreset::Custom);
+                config.view.proc_grouped = grouped;
+                let mut state = responsive_fixture(&config);
+                for (width, height) in [
+                    (120, 40),
+                    (80, 24),
+                    (60, 20),
+                    (40, 12),
+                    (30, 10),
+                    (20, 8),
+                    (8, 3),
+                    (1, 1),
+                    (0, 0),
+                    (0, 8),
+                    (8, 0),
+                ] {
+                    let size = TerminalSize { width, height };
+                    state.render.mark_resize();
+                    execute_dirty_work(&mut state, &mut config, size);
+                    let raw = render_widget_layer_full(&state, &config, &theme);
+                    let clipped = draw::buffer::clip_to_viewport(&raw, width, height);
+                    let cells = assert_frame_bounds(&clipped, width, height);
+                    if width > 0 && height > 0 {
+                        assert!(cells > 0, "blank {width}x{height}: {root}");
+                    }
+                    assert!(!raw.contains("Terminal too small"));
+                    assert_eq!(config.layout_spec(), &root);
+                }
+            }
+        }
+        let config = config::Config::new();
+        let overlays = [
+            ActiveModal::Main(crate::overlay::main_menu::MainMenuState::new()),
+            ActiveModal::Help(crate::overlay::help::HelpState::new(
+                crate::overlay::ReturnTarget::Normal,
+            )),
+            ActiveModal::Options(crate::overlay::options::OptionsState::new(
+                crate::overlay::ReturnTarget::Normal,
+            )),
+        ];
+        for active in overlays {
+            for (width, height) in [
+                (120, 40),
+                (80, 24),
+                (60, 20),
+                (40, 12),
+                (30, 10),
+                (20, 8),
+                (8, 3),
+                (1, 1),
+                (0, 0),
+            ] {
+                let raw = crate::overlay::render(
+                    &active,
+                    TerminalSize { width, height },
+                    &config,
+                    &theme,
+                );
+                assert_frame_bounds(
+                    &draw::buffer::clip_to_viewport(&raw, width, height),
+                    width,
+                    height,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compact_processes_show_group_count_totals_and_keep_last_selection_visible() {
+        let mut config = config::Config::new();
+        config.set_custom_layout("proc").unwrap();
+        config.set_active_preset(crate::domain::preset::ActivePreset::Custom);
+        config.view.proc_grouped = true;
+        config.view.proc_reversed = true;
+        let mut state = responsive_fixture(&config);
+        let theme = theme::Theme::new();
+        let size = TerminalSize {
+            width: 40,
+            height: 8,
+        };
+        execute_dirty_work(&mut state, &mut config, size);
+        let out = render_widget_layer_full(&state, &config, &theme);
+        assert!(out.contains("ChatGPT (2)"));
+        assert!(
+            out.contains("10.0"),
+            "aggregate CPU should use the same core normalization"
+        );
+        state.process.selected = state.process.entries.len() - 1;
+        state.render.clear_dirty();
+        state.render.dirty.mark_proc_widget();
+        execute_dirty_work(&mut state, &mut config, size);
+        assert!(state.process.selected >= state.process.start);
+        assert!(
+            state.process.selected
+                < state.process.start + ui::responsive::process_row_count(8, false)
+        );
+    }
+
+    #[test]
+    fn compact_rendering_preserves_per_widget_dirty_flags() {
+        let mut config = config::Config::new();
+        let mut state = responsive_fixture(&config);
+        execute_dirty_work(
+            &mut state,
+            &mut config,
+            TerminalSize {
+                width: 20,
+                height: 8,
+            },
+        );
+        let theme = theme::Theme::new();
+        let mut dirty = RenderDirty::empty();
+        dirty.mark_widget(crate::domain::widget_kind::WidgetKind::Cpu);
+        let params = RenderInputs {
+            layout: state.render.cached_layout().unwrap(),
+            live: &state.live,
+            process: &state.process,
+            network: &state.network,
+            gpu: &state.gpu,
+            view: &state.view,
+            filter: &state.filter,
+            config: &config,
+            theme: &theme,
+            dirty,
+            is_filtering: false,
+        }
+        .build();
+        let out = render_all(&params);
+        assert!(out.contains("CPU"));
+        assert!(!out.contains("RAM"));
+        assert!(!out.contains("Program"));
     }
 
     #[test]

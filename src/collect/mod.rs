@@ -8,6 +8,7 @@ pub mod network;
 pub(crate) mod pawnio;
 pub mod process;
 pub mod process_display;
+pub mod process_groups;
 pub mod statusbar;
 pub(crate) mod win;
 

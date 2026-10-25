@@ -119,6 +119,9 @@ const MENU_WIDTHS: [usize; 3] = [19, 12, 12];
 /// derived from the theme's `hi_fg` (selected) and `main_fg`
 /// (normal).
 pub fn render(state: &MainMenuState, term: TerminalSize, theme: &Theme) -> String {
+    if term.width < 35 || term.height < 18 {
+        return render_compact(state, term, theme);
+    }
     let selected = state.selected().index();
     let hi_rgb = theme.rgb(tc::HI_FG);
     let fg_rgb = theme.rgb(tc::MAIN_FG);
@@ -160,6 +163,45 @@ pub fn render(state: &MainMenuState, term: TerminalSize, theme: &Theme) -> Strin
 
     out.push_str(term::RESET);
     out
+}
+
+fn render_compact(state: &MainMenuState, term: TerminalSize, theme: &Theme) -> String {
+    let mut buf = crate::draw::buffer::AnsiBuffer::new();
+    if term.width == 0 || term.height == 0 {
+        return buf.finish();
+    }
+    let blank = " ".repeat(term.width);
+    for row in 1..=term.height {
+        buf.mv(1, row).reset().text(&blank);
+    }
+    let first = if term.height < 3 {
+        state.selected().index()
+    } else {
+        0
+    };
+    for (row, item) in MainMenuItem::all()
+        .into_iter()
+        .skip(first)
+        .take(term.height)
+        .enumerate()
+    {
+        let label = match item {
+            MainMenuItem::Options => "Options",
+            MainMenuItem::Help => "Help",
+            MainMenuItem::Quit => "Quit",
+        };
+        let selected = item == state.selected();
+        let marker = if selected { ">" } else { " " };
+        buf.mv(1, row + 1)
+            .color(theme.color(if selected { tc::HI_FG } else { tc::MAIN_FG }))
+            .text(&crate::tools::ljust(
+                &format!("{marker} {label}"),
+                term.width,
+                true,
+            ))
+            .reset();
+    }
+    buf.finish()
 }
 
 pub(crate) fn quit_action(ctx: &mut InputContext, _: &Key) {
@@ -241,6 +283,37 @@ fn open_help_from_main(ctx: &mut InputContext, main_state: MainMenuState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_menu_keeps_selected_item_visible_at_one_row() {
+        let theme = Theme::new();
+        let mut state = MainMenuState::new();
+        state.select_prev();
+        let out = render(
+            &state,
+            TerminalSize {
+                width: 20,
+                height: 1,
+            },
+            &theme,
+        );
+        assert!(out.contains("> Quit"));
+        assert!(!out.contains("Options"));
+        assert!(!out.contains("\x1b[2;"));
+    }
+
+    #[test]
+    fn compact_menu_accepts_empty_viewports() {
+        let theme = Theme::new();
+        for (width, height) in [(0, 0), (0, 10), (10, 0)] {
+            let out = render(
+                &MainMenuState::new(),
+                TerminalSize { width, height },
+                &theme,
+            );
+            assert_eq!(out, term::RESET);
+        }
+    }
 
     #[test]
     fn new_selects_first_item() {

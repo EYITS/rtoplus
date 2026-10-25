@@ -218,6 +218,7 @@ pub const PROC: &[ConfigKey] = &[
     ConfigKey::Enum(EnumKey::ProcSorting),
     ConfigKey::Bool(BoolKey::ProcReversed),
     ConfigKey::Bool(BoolKey::ProcTree),
+    ConfigKey::Bool(BoolKey::ProcGrouped),
     ConfigKey::Bool(BoolKey::ProcAggregate),
     ConfigKey::Bool(BoolKey::ProcColors),
     ConfigKey::Bool(BoolKey::ProcPerCore),
@@ -432,6 +433,9 @@ pub fn render(state: &OptionsState, term: TerminalSize, config: &Config, theme: 
 /// buffer with an underline cursor; the right panel additionally
 /// shows any validation error.
 pub fn draw(p: &DrawParams) -> String {
+    if p.term_width < 78 || p.term_height < 16 {
+        return draw_compact(p);
+    }
     let term_width = p.term_width;
     let term_height = p.term_height;
     let cat = p.cat;
@@ -743,20 +747,99 @@ pub fn draw(p: &DrawParams) -> String {
     out
 }
 
+/// A single-column options menu without the banner or description pane.
+/// It uses the same page size as keyboard navigation, including at 1x1.
+fn draw_compact(p: &DrawParams) -> String {
+    if p.term_width == 0 || p.term_height == 0 {
+        return String::new();
+    }
+    let category = &CATEGORIES[p.cat.min(CATEGORIES.len() - 1)];
+    let per_page = items_per_page(p.cat, p.term_height);
+    let pages = category.options.len().div_ceil(per_page).max(1);
+    let page = p.page.min(pages - 1);
+    let first = page * per_page;
+    let selected = p
+        .selected
+        .min(per_page - 1)
+        .min(category.options.len().saturating_sub(first + 1));
+    let mut buf = crate::draw::buffer::AnsiBuffer::new();
+    let hi = p.theme.color(tc::HI_FG);
+    let fg = p.theme.color(tc::MAIN_FG);
+    let blank = " ".repeat(p.term_width);
+    for row in 1..=p.term_height {
+        buf.mv(1, row).reset().text(&blank);
+    }
+    let mut row = 1;
+    if p.term_height >= 3 {
+        let title = format!("Options: {} {}/{} [Tab]", category.name, page + 1, pages);
+        buf.mv(1, row)
+            .bold()
+            .color(hi)
+            .text(&crate::tools::ljust(&title, p.term_width, true))
+            .reset();
+        row += 1;
+    }
+    for (offset, &key) in category
+        .options
+        .iter()
+        .skip(first)
+        .take(per_page)
+        .enumerate()
+    {
+        if row > p.term_height {
+            break;
+        }
+        let is_selected = offset == selected;
+        let marker = if is_selected { ">" } else { " " };
+        let name = format!("{marker} {}", capitalize_option(key));
+        buf.mv(1, row)
+            .color(if is_selected { hi } else { fg })
+            .text(&crate::tools::ljust(&name, p.term_width, true))
+            .reset();
+        row += 1;
+        if row > p.term_height {
+            break;
+        }
+        buf.mv(1, row).color(fg);
+        if let Some(edit) = p
+            .option_edit
+            .filter(|edit| is_selected && edit.key() == key)
+        {
+            buf.text(&render_edit_value(
+                edit.buffer(),
+                edit.cursor(),
+                p.term_width,
+            ));
+        } else {
+            buf.text(&crate::tools::ljust(
+                &get_value(key, p.config),
+                p.term_width,
+                true,
+            ));
+        }
+        buf.reset();
+        row += 1;
+    }
+    if row <= p.term_height {
+        let hint = p
+            .option_edit
+            .and_then(|edit| edit.error())
+            .unwrap_or("Arrows: select/change  Esc: back");
+        buf.mv(1, p.term_height)
+            .color(hi)
+            .text(&crate::tools::ljust(hint, p.term_width, true))
+            .reset();
+    }
+    buf.finish()
+}
+
 /// Return the option key at `(cat, index)`.
 pub fn opt_key(cat: usize, page: usize, selected: usize, term_height: usize) -> Option<ConfigKey> {
     if cat >= CATEGORIES.len() {
         return None;
     }
     let options = CATEGORIES[cat].options;
-    let global_max = CATEGORIES
-        .iter()
-        .map(|c| c.options.len())
-        .max()
-        .unwrap_or(0);
-    let height = (global_max * 2 + 4).min(term_height.saturating_sub(8));
-    let height = if height % 2 != 0 { height - 1 } else { height };
-    let item_height = ((height - 4) / 2).min(global_max);
+    let item_height = items_per_page(cat, term_height);
     let idx = item_height * page + selected;
     options.get(idx).copied()
 }
@@ -766,6 +849,9 @@ pub fn items_per_page(cat: usize, term_height: usize) -> usize {
     if cat >= CATEGORIES.len() {
         return 1;
     }
+    if term_height < 16 {
+        return (term_height.saturating_sub(2) / 2).max(1);
+    }
     let global_max = CATEGORIES
         .iter()
         .map(|c| c.options.len())
@@ -773,7 +859,7 @@ pub fn items_per_page(cat: usize, term_height: usize) -> usize {
         .unwrap_or(0);
     let height = (global_max * 2 + 4).min(term_height.saturating_sub(8));
     let height = if height % 2 != 0 { height - 1 } else { height };
-    ((height - 4) / 2).min(global_max).max(1)
+    (height.saturating_sub(4) / 2).min(global_max).max(1)
 }
 
 /// Number of pages for a category.
@@ -800,6 +886,39 @@ pub fn select_max(cat: usize, page: usize, term_height: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_options_render_and_page_through_every_option_at_tiny_sizes() {
+        let config = Config::new();
+        let theme = Theme::new();
+        for height in 0..=24 {
+            for (cat, category) in CATEGORIES.iter().enumerate() {
+                let per_page = items_per_page(cat, height);
+                assert!(per_page > 0);
+                for (index, &key) in category.options.iter().enumerate() {
+                    assert_eq!(
+                        opt_key(cat, index / per_page, index % per_page, height),
+                        Some(key)
+                    );
+                }
+                for width in [0, 1, 10, 20, 30, 40, 60, 80] {
+                    let out = draw(&DrawParams {
+                        term_width: width,
+                        term_height: height,
+                        cat,
+                        selected: 0,
+                        page: 0,
+                        config: &config,
+                        theme: &theme,
+                        option_edit: None,
+                    });
+                    if width > 3 && height > 0 && (width < 78 || height < 16) {
+                        assert!(out.contains('>'), "selection missing at {width}x{height}");
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn option_keys_roundtrip_through_config_parser() {

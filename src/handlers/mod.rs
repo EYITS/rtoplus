@@ -40,20 +40,12 @@ pub(crate) struct InputContext<'a> {
 
 impl InputContext<'_> {
     pub(crate) fn selected_proc_pid(&self) -> Option<u32> {
-        let procs = self.process.procs_source(self.live)?;
-        self.process
-            .entries
-            .get(self.process.selected)
-            .and_then(|entry| procs.get(entry.proc_index))
-            .map(|proc| proc.pid)
+        self.process.selected_process().map(|proc| proc.pid)
     }
 
     pub(crate) fn selected_proc_info(&self) -> Option<(u32, &str)> {
-        let procs = self.process.procs_source(self.live)?;
         self.process
-            .entries
-            .get(self.process.selected)
-            .and_then(|entry| procs.get(entry.proc_index))
+            .selected_process()
             .map(|proc| (proc.pid, proc.name.as_str()))
     }
 

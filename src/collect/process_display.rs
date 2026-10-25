@@ -297,7 +297,7 @@ fn aggregate_tree_entries(
     result
 }
 
-fn compare_procs(a: &ProcInfo, b: &ProcInfo, sort_by: ProcSort) -> std::cmp::Ordering {
+pub(super) fn compare_procs(a: &ProcInfo, b: &ProcInfo, sort_by: ProcSort) -> std::cmp::Ordering {
     match sort_by {
         ProcSort::Pid => a.pid.cmp(&b.pid),
         ProcSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),

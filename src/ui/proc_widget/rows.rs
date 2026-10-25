@@ -74,7 +74,7 @@ pub(super) fn draw_rows(buf: &mut AnsiBuffer, params: &ProcessRowsParams<'_>) {
                 tree_mode: params.tree_mode,
                 settings: params.settings,
                 colors: params.colors,
-                dead: params.dead_pids.contains(&proc.pid),
+                dead: entry.group.is_none() && params.dead_pids.contains(&proc.pid),
             },
         );
     }
@@ -99,24 +99,55 @@ fn draw_process_row(buf: &mut AnsiBuffer, params: &ProcessRowParams<'_>) {
         params.colors,
     );
 
-    let (tree_prefix, bare_name) = if params.tree_mode && !params.entry.prefix.is_empty() {
-        (params.entry.prefix.as_str(), params.proc.name.as_str())
-    } else {
-        ("", params.proc.name.as_str())
-    };
+    let tree_prefix =
+        if (params.tree_mode || params.entry.group.is_some() || params.entry.depth > 0)
+            && !params.entry.prefix.is_empty()
+        {
+            params.entry.prefix.as_str()
+        } else {
+            ""
+        };
     let prefix_w = tools::ulen(tree_prefix);
     let name_avail = columns.name_w.saturating_sub(prefix_w);
-    let display_name = tools::uresize(bare_name, name_avail);
-    let pid_str = format!("{:<pid_w$}", params.proc.pid, pid_w = columns.pid_w);
+    let display_name = if let Some(group) = params.entry.group.as_ref() {
+        let suffix = format!(" ({})", group.count);
+        let suffix_w = tools::ulen(&suffix);
+        if name_avail >= suffix_w {
+            format!(
+                "{}{}",
+                tools::uresize(&group.name, name_avail - suffix_w),
+                suffix
+            )
+        } else {
+            tools::uresize(&suffix, name_avail)
+        }
+    } else {
+        tools::uresize(&params.proc.name, name_avail)
+    };
+    let pid_str = if params.entry.group.is_some() {
+        format!("{:<pid_w$}", "-", pid_w = columns.pid_w)
+    } else {
+        format!("{:<pid_w$}", params.proc.pid, pid_w = columns.pid_w)
+    };
     let cpu_str = format!("{:>cpu_w$.1}", display_cpu, cpu_w = columns.cpu_w);
     let mem_str_fmt = format!("{:>mem_w$}", mem_str, mem_w = columns.mem_w);
-    let cmd_display = command_display(params.proc, columns);
+    let cmd_display = if let Some(group) = params.entry.group.as_ref() {
+        if columns.has_cmd_col {
+            tools::uresize(&format!("{} processes", group.count), columns.cmd_w)
+        } else {
+            String::new()
+        }
+    } else {
+        command_display(params.proc, columns)
+    };
     // Process names may contain multi-byte characters, so right-pad by
     // visible width rather than byte length to keep the cmd / cpu /
     // mem columns aligned across rows.
     let name_padded = tools::ljust(&display_name, name_avail, true);
 
-    let is_followed = params.followed_pid > 0 && params.proc.pid == params.followed_pid;
+    let is_followed = params.entry.group.is_none()
+        && params.followed_pid > 0
+        && params.proc.pid == params.followed_pid;
 
     if is_followed {
         draw_followed_process_row(
