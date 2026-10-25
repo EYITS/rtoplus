@@ -1,0 +1,91 @@
+name: Windows Build
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Rust
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+
+      - name: Cache dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: windows-msvc-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            windows-msvc-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}-
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+      - name: Test
+        run: cargo test --locked --target x86_64-pc-windows-msvc
+
+      - name: Build executable
+        run: cargo build --locked --release --target x86_64-pc-windows-msvc
+
+      - name: Smoke test and checksum
+        shell: pwsh
+        run: |
+          $exePath = 'target/x86_64-pc-windows-msvc/release/rtop.exe'
+          & $exePath --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $defaults = & $exePath --default-config
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $defaults | Set-Content -Encoding utf8 'rtop-default.toml'
+          $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $exePath).Hash.ToLowerInvariant()
+          "$hash  rtop.exe" | Set-Content -Encoding ascii 'rtop.exe.sha256'
+          @(
+            '### Windows executable',
+            '',
+            'Download **rtop-windows-x64** from the Artifacts section below and extract rtop.exe.',
+            '',
+            "Commit: $env:GITHUB_SHA",
+            '',
+            "SHA256: $hash"
+          ) | Add-Content -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v7
+        with:
+          name: rtop-windows-x64
+          path: |
+            target/x86_64-pc-windows-msvc/release/rtop.exe
+            rtop.exe.sha256
+            rtop-default.toml
+            LICENSE
+            README.md
+            docs/windows-build-tr.md
+          if-no-files-found: error
+          retention-days: 30
