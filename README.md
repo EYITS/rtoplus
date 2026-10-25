@@ -276,11 +276,14 @@ The grammar:
 ```
 layout := widget                                          # a single widget
         | vstack(layout, layout, ...)                     # children stacked top-to-bottom
-        | hstack(weight:layout, weight:layout, ...)       # children laid out left-to-right
+        | hstack([weight:]layout, [weight:]layout, ...)   # children laid out left-to-right
                                                           # weight is 1..255 (relative width share)
 ```
 
 Widgets are `cpu`, `mem`, `net`, `proc`, `disk`, and `gpu`. Each widget appears at most once.
+
+Horizontal weights are optional and default to 1, so `hstack(cpu, proc)`
+splits the available width equally. Existing explicit weights keep their proportions.
 
 Edit the custom layout two ways:
 

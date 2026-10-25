@@ -773,6 +773,7 @@ mod tests {
         config.set_custom_layout("proc").unwrap();
         config.set_active_preset(crate::domain::preset::ActivePreset::Custom);
         config.view.proc_grouped = true;
+        config.view.proc_reversed = true;
         let mut state = responsive_fixture(&config);
         let theme = theme::Theme::new();
         let size = TerminalSize {

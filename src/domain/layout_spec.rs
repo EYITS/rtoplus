@@ -21,6 +21,7 @@
 //! cpu
 //! vstack(cpu, mem)
 //! hstack(40:cpu, 60:proc)
+//! hstack(cpu, proc)
 //! vstack(cpu, hstack(40:vstack(mem, net, disk), 60:proc))
 //! ```
 //!
@@ -353,6 +354,10 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_hstack_child(&mut self) -> Result<HStackChild, SlotParseError> {
+        self.skip_ws();
+        if self.peek().is_some_and(|b| b.is_ascii_lowercase()) {
+            return Ok(HStackChild::new(self.parse_slot()?, NonZeroU8::MIN));
+        }
         let raw = self.read_number()?;
         let weight = NonZeroU8::new(raw).ok_or_else(|| SlotParseError::InvalidWeight {
             text: "0".to_string(),
@@ -551,6 +556,27 @@ mod tests {
                 HStackChild::new(Slot::Widget(WidgetKind::Proc), nz(60)),
             ]))
         );
+    }
+
+    #[test]
+    fn parse_unweighted_hstack_uses_equal_shares_in_requested_custom_layout() {
+        let input = "vstack(hstack(vstack(cpu, gpu), vstack(mem, proc)), statusbar)";
+        let parsed: Slot = input.parse().unwrap();
+        let weighted: Slot = "vstack(hstack(1:vstack(cpu, gpu), 1:vstack(mem, proc)), statusbar)"
+            .parse()
+            .unwrap();
+        assert_eq!(parsed, weighted);
+        assert_eq!(parsed.to_string().parse::<Slot>().unwrap(), parsed);
+    }
+
+    #[test]
+    fn parse_hstack_can_mix_default_and_explicit_weights() {
+        let parsed: Slot = "hstack(cpu, 2:proc)".parse().unwrap();
+        assert_eq!(parsed.to_string(), "hstack(1:cpu, 2:proc)");
+        assert!(matches!(
+            "hstack(cpu, cpu)".parse::<Slot>(),
+            Err(SlotParseError::DuplicateWidget(WidgetKind::Cpu))
+        ));
     }
 
     #[test]
