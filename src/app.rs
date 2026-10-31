@@ -105,6 +105,8 @@ pub fn run(config: &mut config::Config, terminal: &mut term::Terminal, theme: &m
         let size = terminal_size(terminal);
 
         // Always consume slot data into LiveData regardless of overlay state.
+        crate::collect::process_gpu::set_enabled(state.view.proc_gpu);
+        crate::collect::process_io::set_enabled(state.view.proc_net, state.view.proc_disk);
         let render_ui = config.ui.background_update || state.overlay.render_ui();
         pull::pull_subsystem_data(&mut state, config, &manager, render_ui, &ready);
 

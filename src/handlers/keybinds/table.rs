@@ -135,6 +135,15 @@ pub(crate) static BINDINGS: &[Binding] = &[
         action: normal::restore_widgets_action,
     },
 
+    Binding { keys: &[KeySpec::Always(Key::Char('N'))], states: NORMAL,
+        help: Some(HelpEntry {category:"Process",keys:"Shift+N",description:"Toggle process network rate"}), action:normal::toggle_proc_net_action },
+    Binding { keys: &[KeySpec::Always(Key::Char('D'))], states: NORMAL,
+        help: Some(HelpEntry {category:"Process",keys:"Shift+D",description:"Toggle process disk rate"}), action:normal::toggle_proc_disk_action },
+    Binding {
+        keys: &[KeySpec::Always(Key::Char('U'))], states: NORMAL,
+        help: Some(HelpEntry { category: "Process", keys: "Shift+U", description: "Toggle process GPU (hides PID)" }),
+        action: normal::toggle_proc_gpu_action,
+    },
     Binding {
         keys: &[KeySpec::Always(Key::Up), KeySpec::VimOnly(Key::Char('k'))],
         states: NORMAL,

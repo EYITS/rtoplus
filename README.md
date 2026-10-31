@@ -131,10 +131,35 @@ parent/child relationship can join processes; otherwise they stay separate.
 This deliberately favors avoiding incorrect groups. Working-set totals may
 count shared pages more than once and need not match Windows Task Manager.
 
-Group headers cannot be terminated, killed, or followed. Expand a group and
-select an individual PID to use those actions. Following a PID keeps its group
+Press `Shift+T` twice on a group header to force-close its captured member PIDs.
+The first press shows the application and count for confirmation; another key
+cancels. Newly created members are excluded from the confirmation, and recycled
+PIDs are rejected by process creation time on the opened kill handle. Windows
+can refuse protected processes or processes owned by another user.
+Graceful termination and following still require an individual PID. Following a PID keeps its group
 expanded. `e` still enables the existing process tree; tree view and application
 grouping are alternative views, and the original flat view remains available.
+
+### Optional process resource columns
+
+`Shift+U` toggles **GPU%**, `Shift+N` toggles **Net/s**, and `Shift+D` toggles
+**Disk/s** independently. Options → proc has the persistent `proc_gpu`,
+`proc_net`, and `proc_disk` settings. GPU appears immediately after memory and
+hides PID; turning it off restores PID when space permits. Left/Right cycles
+sorting through enabled metrics, and `r` reverses it. Application headers sort
+by their complete group totals. Narrow tables drop secondary columns as needed.
+
+GPU uses Windows WDDM performance counters, with the busiest engine across GPUs
+representing a PID. A group sums members on each engine before choosing the
+busiest engine. Initial samples or unsupported counters show `--`.
+
+Network is TCP/UDP send+receive bytes/s, including LAN traffic. Disk is physical
+read+write bytes/s, attributed to the issuing thread. These use a temporary
+kernel ETW session and require running rtop as Administrator. No service is
+installed and no automatic elevation is requested. Without access, or if trace
+data is lost, the values show `--`. Closing normally stops the owned session;
+forcibly killing rtop may leave its ETW session until Windows restarts.
+All three collectors are disabled by default and collect only while enabled.
 
 ### Small terminal windows
 

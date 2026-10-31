@@ -198,6 +198,26 @@ fn draw_process_row(buf: &mut AnsiBuffer, params: &ProcessRowParams<'_>) {
     }
 }
 
+fn draw_gpu(buf: &mut AnsiBuffer, params: &ProcessRowParams<'_>) {
+    let [gpu, net, disk] = params.entry.resource_usage(params.proc);
+    if params.layout.columns.gpu_w > 0 {
+        buf.text(&format!(
+            " {:>6}",
+            gpu.map(|v| format!("{v:.1}"))
+                .unwrap_or_else(|| "--".into())
+        ));
+    }
+    for (show, value) in [
+        (params.settings.proc_net, net),
+        (params.settings.proc_disk, disk),
+    ] {
+        if show {
+            buf.text(" ")
+                .text(&tools::rjust(&crate::ui::responsive::rate(value), 7, true));
+        }
+    }
+}
+
 fn command_display(proc: &ProcInfo, columns: &ProcColumns) -> String {
     if !columns.has_cmd_col || columns.cmd_w == 0 {
         return String::new();
@@ -217,7 +237,9 @@ fn draw_selected_process_row(
     buf.mv(params.layout.x + 3, params.row_y)
         .text(bg_esc)
         .color(params.colors.sel_fg);
-    buf.text(&row.pid).text(" ");
+    if columns.pid_w > 0 {
+        buf.text(&row.pid).text(" ");
+    }
     if !row.tree_prefix.is_empty() {
         buf.text(row.tree_prefix);
     }
@@ -228,6 +250,7 @@ fn draw_selected_process_row(
         buf.text(" ");
     }
     buf.text(&row.cpu).text(" ").text(&row.mem);
+    draw_gpu(buf, params);
     buf.reset();
 }
 
@@ -241,7 +264,9 @@ fn draw_followed_process_row(
     buf.mv(params.layout.x + 3, params.row_y)
         .text(bg_esc)
         .color(params.colors.followed_fg);
-    buf.text(&row.pid).text(" ");
+    if columns.pid_w > 0 {
+        buf.text(&row.pid).text(" ");
+    }
     if !row.tree_prefix.is_empty() {
         buf.text(row.tree_prefix);
     }
@@ -252,6 +277,7 @@ fn draw_followed_process_row(
         buf.text(" ");
     }
     buf.text(&row.cpu).text(" ").text(&row.mem);
+    draw_gpu(buf, params);
     buf.reset();
 }
 
@@ -264,7 +290,9 @@ fn draw_unselected_process_row(
     let columns = &params.layout.columns;
     buf.mv(params.layout.x + 3, params.row_y)
         .color(row_colors.text);
-    buf.text(&row.pid).text(" ");
+    if columns.pid_w > 0 {
+        buf.text(&row.pid).text(" ");
+    }
     if !row.tree_prefix.is_empty() {
         buf.color(params.colors.tree_fg)
             .text(row.tree_prefix)
@@ -278,6 +306,7 @@ fn draw_unselected_process_row(
     }
     buf.color(row_colors.cpu).text(&row.cpu).text(" ");
     buf.color(row_colors.mem).text(&row.mem);
+    draw_gpu(buf, params);
 }
 
 fn draw_process_name_padding(buf: &mut AnsiBuffer, row: &RowText<'_>, name_w: usize) {
@@ -393,6 +422,9 @@ mod tests {
             total_mem: 1024 * 1024 * 1024,
             proc_colors: true,
             base_10: false,
+            proc_gpu: false,
+            proc_net: false,
+            proc_disk: false,
         }
     }
 

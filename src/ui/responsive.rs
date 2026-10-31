@@ -256,9 +256,54 @@ struct Columns {
     command: usize,
     cpu: usize,
     memory: usize,
+    gpu: usize,
+    net: usize,
+    disk: usize,
 }
 
 impl Columns {
+    fn configured(width: usize, gpu: bool, net: bool, disk: bool) -> Self {
+        if !gpu && !net && !disk {
+            return Self::new(width);
+        }
+        let mut cols = Self {
+            name: 0,
+            pid: 0,
+            command: 0,
+            cpu: 3,
+            memory: 4,
+            gpu: if gpu { 4 } else { 0 },
+            net: if net { 5 } else { 0 },
+            disk: if disk { 5 } else { 0 },
+        };
+        if !gpu && width >= 64 {
+            cols.pid = 7;
+        }
+        let budget = width.saturating_sub(1);
+        let used = |c: &Self| {
+            [c.pid, c.command, c.cpu, c.memory, c.gpu, c.net, c.disk]
+                .iter()
+                .filter(|&&v| v > 0)
+                .map(|v| v + 1)
+                .sum::<usize>()
+        };
+        for drop in 0..7 {
+            if used(&cols) + 3 <= budget {
+                break;
+            }
+            match drop {
+                0 => cols.pid = 0,
+                1 => cols.disk = 0,
+                2 => cols.net = 0,
+                3 => cols.cpu = 0,
+                4 => cols.memory = 0,
+                5 => cols.gpu = 0,
+                _ => {}
+            }
+        }
+        cols.name = budget.saturating_sub(used(&cols));
+        cols
+    }
     fn new(width: usize) -> Self {
         let pid = if width >= 44 { 7 } else { 0 };
         let command = if width >= 72 { width / 4 } else { 0 };
@@ -275,16 +320,23 @@ impl Columns {
             command,
             cpu,
             memory,
+            gpu: 0,
+            net: 0,
+            disk: 0,
         }
     }
 
-    fn row(&self, fields: [&str; 5]) -> String {
+    fn row(&self, fields: [&str; 8]) -> String {
         let mut text = tools::ljust(fields[0], self.name, true);
-        for (field, width) in
-            fields[1..]
-                .iter()
-                .zip([self.pid, self.command, self.cpu, self.memory])
-        {
+        for (field, width) in fields[1..].iter().zip([
+            self.pid,
+            self.command,
+            self.cpu,
+            self.memory,
+            self.gpu,
+            self.net,
+            self.disk,
+        ]) {
             if width > 0 {
                 text.push(' ');
                 text.push_str(&tools::rjust(field, width, true));
@@ -333,10 +385,36 @@ fn process_memory(raw: u64, params: &RenderParams<'_>) -> String {
     }
 }
 
+pub(crate) fn rate(value: Option<f64>) -> String {
+    value
+        .map(|v| tools::floating_humanizer(v.max(0.0) as u64, true, 0, false, false, false))
+        .unwrap_or_else(|| "--".into())
+}
+
 fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
-    let columns = Columns::new(canvas.dim.width);
+    use crate::collect::process_display::ProcSort;
+    let label = |text: &str, sort| {
+        if params.view.proc_sorting == sort {
+            format!(
+                "{text}{}",
+                if params.view.proc_reversed {
+                    "▼"
+                } else {
+                    "▲"
+                }
+            )
+        } else {
+            text.to_string()
+        }
+    };
+    let columns = Columns::configured(
+        canvas.dim.width,
+        params.view.proc_gpu,
+        params.view.proc_net,
+        params.view.proc_disk,
+    );
     let mut row = 0;
-    if canvas.dim.height > 1 {
+    if canvas.dim.height > 1 || params.armed_terminate.is_some() {
         let header = if let Some((name, force)) = params.armed_terminate {
             format!(
                 "{}: {} to confirm",
@@ -349,15 +427,21 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
             format!(
                 " {}",
                 columns.row([
-                    if params.proc_paused {
-                        "Paused"
-                    } else {
-                        "Program"
-                    },
-                    "PID",
-                    "Command",
-                    "CPU%",
-                    "Memory"
+                    &label(
+                        if params.proc_paused {
+                            "Paused"
+                        } else {
+                            "Program"
+                        },
+                        ProcSort::Name
+                    ),
+                    &label("PID", ProcSort::Pid),
+                    &label("Command", ProcSort::Command),
+                    &label("C", ProcSort::Cpu),
+                    &label("Mem", ProcSort::Memory),
+                    &label("GPU", ProcSort::Gpu),
+                    &label("Net", ProcSort::Net),
+                    &label("Disk", ProcSort::Disk)
                 ])
             )
         };
@@ -408,6 +492,7 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
             .group
             .as_ref()
             .map(|group| format!("{} processes", group.count));
+        let [gpu, net, disk] = entry.resource_usage(proc);
         let text = format!(
             "{}{}",
             if selected {
@@ -422,7 +507,11 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
                 &pid,
                 command.as_deref().unwrap_or(&proc.cmd),
                 &cpu,
-                &memory
+                &memory,
+                &gpu.map(|v| format!("{v:.1}"))
+                    .unwrap_or_else(|| "--".into()),
+                &rate(net),
+                &rate(disk)
             ])
         );
         let color = if selected {
@@ -478,12 +567,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn independently_enabled_metrics_fit_small_viewports_and_gpu_hides_pid() {
+        for width in 1..=160 {
+            for mask in 0..8 {
+                let cols = Columns::configured(width, mask & 1 != 0, mask & 2 != 0, mask & 4 != 0);
+                if mask & 1 != 0 {
+                    assert_eq!(cols.pid, 0);
+                }
+                let row = format!(
+                    " {}",
+                    cols.row([
+                        "ChatGPT (16)",
+                        "12345",
+                        "command",
+                        "9.9",
+                        "512M",
+                        "2.0",
+                        "1.2M",
+                        "5.4M"
+                    ])
+                );
+                assert!(
+                    tools::ulen(&row) <= width,
+                    "width={width} mask={mask} row={row:?}"
+                );
+            }
+        }
+        assert!(Columns::configured(20, true, false, false).gpu > 0);
+        assert!(Columns::configured(40, true, true, true).net > 0);
+        assert!(Columns::configured(40, true, true, true).disk > 0);
+    }
+
+    #[test]
     fn compact_columns_fit_display_cells_and_drop_lower_priority_columns() {
         for width in 1..=160 {
             let columns = Columns::new(width);
             let text = format!(
                 " {}",
-                columns.row(["程序çalışma", "123456", "long command", "10.5", "8.0G"])
+                columns.row([
+                    "程序çalışma",
+                    "123456",
+                    "long command",
+                    "10.5",
+                    "8.0G",
+                    "1.0",
+                    "2K",
+                    "3K"
+                ])
             );
             assert!(tools::ulen(&text) <= width, "width={width}: {text:?}");
         }

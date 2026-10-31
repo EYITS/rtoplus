@@ -30,6 +30,10 @@ pub struct ProcInfo {
     pub mem: u64,
     /// Current CPU usage percentage (may exceed 100% if per-core).
     pub cpu_p: f64,
+    pub gpu_p: Option<f64>,
+    pub net_bps: Option<f64>,
+    pub disk_bps: Option<f64>,
+    pub gpu_engines: Vec<(String, f64)>,
     /// Current process state.
     pub state: ProcState,
     /// Process priority class.
@@ -56,6 +60,10 @@ impl Default for ProcInfo {
             user: String::new(),
             mem: 0,
             cpu_p: 0.0,
+            gpu_p: None,
+            net_bps: None,
+            disk_bps: None,
+            gpu_engines: Vec::new(),
             state: ProcState::Unknown,
             priority: PriorityClass::Normal,
             ppid: 0,
@@ -98,11 +106,23 @@ pub struct ProcDisplayEntry {
     pub cpu_override: Option<f64>,
     /// Aggregated memory override (used when `proc_aggregate` is on in tree mode).
     pub mem_override: Option<u64>,
+    pub gpu_override: Option<f64>,
+    pub net_override: Option<f64>,
+    pub disk_override: Option<f64>,
     /// Present only for a synthetic application row. Such a row has no actionable PID.
     pub group: Option<ProcGroupSummary>,
 }
 
 impl ProcDisplayEntry {
+    /// Unknown group totals must not fall back to one member's measurement.
+    pub(crate) fn resource_usage(&self, proc: &ProcInfo) -> [Option<f64>; 3] {
+        if self.group.is_some() {
+            [self.gpu_override, self.net_override, self.disk_override]
+        } else {
+            [proc.gpu_p, proc.net_bps, proc.disk_bps]
+        }
+    }
+
     pub fn flat(proc_index: usize) -> Self {
         Self {
             proc_index,
@@ -110,6 +130,9 @@ impl ProcDisplayEntry {
             depth: 0,
             cpu_override: None,
             mem_override: None,
+            gpu_override: None,
+            net_override: None,
+            disk_override: None,
             group: None,
         }
     }
@@ -121,6 +144,9 @@ impl ProcDisplayEntry {
             depth,
             cpu_override: None,
             mem_override: None,
+            gpu_override: None,
+            net_override: None,
+            disk_override: None,
             group: None,
         }
     }
@@ -195,9 +221,16 @@ mod tests {
     fn synthetic_group_cannot_resolve_an_actionable_process() {
         let procs = [ProcInfo {
             pid: 42,
+            gpu_p: Some(10.0),
+            net_bps: Some(20.0),
+            disk_bps: Some(30.0),
             ..Default::default()
         }];
         let mut entry = ProcDisplayEntry::flat(0);
+        assert_eq!(
+            entry.resource_usage(&procs[0]),
+            [Some(10.0), Some(20.0), Some(30.0)]
+        );
         assert_eq!(entry.process(&procs).unwrap().pid, 42);
         entry.group = Some(ProcGroupSummary {
             key: AppGroupKey::Executable(Arc::from("c:\\app.exe")),
@@ -206,6 +239,7 @@ mod tests {
             expanded: false,
         });
         assert!(entry.process(&procs).is_none());
+        assert_eq!(entry.resource_usage(&procs[0]), [None, None, None]);
     }
 
     #[test]

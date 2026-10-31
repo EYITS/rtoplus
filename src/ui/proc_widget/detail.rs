@@ -594,6 +594,9 @@ mod tests {
             total_mem: 1024 * 1024 * 1024,
             proc_colors: true,
             base_10: false,
+            proc_gpu: false,
+            proc_net: false,
+            proc_disk: false,
         }
     }
 

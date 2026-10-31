@@ -338,6 +338,9 @@ impl Default for DiskConfig {
 pub struct ViewConfig {
     pub proc_tree: bool,
     pub proc_grouped: bool,
+    pub proc_gpu: bool,
+    pub proc_disk: bool,
+    pub proc_net: bool,
     pub proc_reversed: bool,
     pub proc_per_core: bool,
     pub proc_sorting: ProcSort,
@@ -367,6 +370,9 @@ impl Default for ViewConfig {
         Self {
             proc_tree: false,
             proc_grouped: false,
+            proc_gpu: false,
+            proc_disk: false,
+            proc_net: false,
             proc_reversed: false,
             proc_per_core: false,
             proc_sorting: ProcSort::Cpu,

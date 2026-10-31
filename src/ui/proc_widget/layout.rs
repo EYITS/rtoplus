@@ -43,6 +43,7 @@ pub(crate) fn detail_row_count(width: usize, height: usize, has_detail: bool) ->
 
 pub(super) struct ProcColumns {
     pub(super) pid_w: usize,
+    pub(super) gpu_w: usize,
     pub(super) name_w: usize,
     pub(super) cmd_w: usize,
     pub(super) cpu_w: usize,
@@ -51,6 +52,20 @@ pub(super) struct ProcColumns {
 }
 
 impl ProcColumns {
+    pub(super) fn extra_metrics(&mut self, net: bool, disk: bool) {
+        let extra = 8 * (usize::from(net) + usize::from(disk));
+        if self.cmd_w >= extra {
+            self.cmd_w -= extra;
+        } else {
+            self.name_w = self.name_w.saturating_sub(extra);
+        }
+    }
+    pub(super) fn with_gpu(inner_w: usize, tree: bool) -> Self {
+        let mut cols = Self::calculate(inner_w, tree);
+        cols.pid_w = 0;
+        cols.gpu_w = 6;
+        cols
+    }
     pub(super) fn calculate(inner_w: usize, tree_mode: bool) -> Self {
         let pid_w = COL_PID;
         let cpu_w = COL_CPU;
@@ -83,6 +98,7 @@ impl ProcColumns {
 
         Self {
             pid_w,
+            gpu_w: 0,
             name_w,
             cmd_w,
             cpu_w,
@@ -157,6 +173,9 @@ impl SortState {
             "command" => self.sort_by == ProcSort::Command,
             "cpu" => matches!(self.sort_by, ProcSort::Cpu),
             "mem" | "memory" => self.sort_by == ProcSort::Memory,
+            "gpu" => self.sort_by == ProcSort::Gpu,
+            "net" => self.sort_by == ProcSort::Net,
+            "disk" => self.sort_by == ProcSort::Disk,
             _ => false,
         }
     }
