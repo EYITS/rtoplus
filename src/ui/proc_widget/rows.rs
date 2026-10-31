@@ -199,24 +199,17 @@ fn draw_process_row(buf: &mut AnsiBuffer, params: &ProcessRowParams<'_>) {
 }
 
 fn draw_gpu(buf: &mut AnsiBuffer, params: &ProcessRowParams<'_>) {
+    let [gpu, net, disk] = params.entry.resource_usage(params.proc);
     if params.layout.columns.gpu_w > 0 {
-        let value = params.entry.gpu_override.or(params.proc.gpu_p);
         buf.text(&format!(
             " {:>6}",
-            value
-                .map(|v| format!("{v:.1}"))
+            gpu.map(|v| format!("{v:.1}"))
                 .unwrap_or_else(|| "--".into())
         ));
     }
     for (show, value) in [
-        (
-            params.settings.proc_net,
-            params.entry.net_override.or(params.proc.net_bps),
-        ),
-        (
-            params.settings.proc_disk,
-            params.entry.disk_override.or(params.proc.disk_bps),
-        ),
+        (params.settings.proc_net, net),
+        (params.settings.proc_disk, disk),
     ] {
         if show {
             buf.text(" ")

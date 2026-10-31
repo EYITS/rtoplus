@@ -304,14 +304,22 @@ fn draw_header(
     buf.mv(col_x, layout.header_y)
         .color(mem_color)
         .text(&mem_str);
-    if columns.gpu_w > 0 {
-        buf.text("   GPU%");
-    }
-    if settings.proc_net {
-        buf.text(" ").text(&crate::tools::rjust("Net/s", 7, true));
-    }
-    if settings.proc_disk {
-        buf.text(" ").text(&crate::tools::rjust("Disk/s", 7, true));
+    for (show, label, key, width) in [
+        (columns.gpu_w > 0, "GPU%", "gpu", 6),
+        (settings.proc_net, "Net/s", "net", 7),
+        (settings.proc_disk, "Disk/s", "disk", 7),
+    ] {
+        if show {
+            let active = sort.is_sort(key);
+            let label = format!("{label}{}", if active { sort.arrow } else { "" });
+            buf.color(if active {
+                colors.hi
+            } else {
+                colors.title_color
+            })
+            .text(" ")
+            .text(&crate::tools::rjust(&label, width, true));
+        }
     }
     buf.reset();
 }

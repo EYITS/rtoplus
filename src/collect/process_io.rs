@@ -34,6 +34,7 @@ struct Session {
     props: Vec<u64>,
     name: Vec<u16>,
     mask: u8,
+    lost: u32,
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -178,6 +179,7 @@ impl Session {
             props,
             name,
             mask,
+            lost: 0,
         })
     }
 }
@@ -259,6 +261,14 @@ pub(crate) struct ProcessIo {
 impl ProcessIo {
     pub(crate) fn collect(&mut self, procs: &mut [ProcInfo]) {
         let mask = ENABLED.load(Ordering::Relaxed);
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|s| s.worker.as_ref().is_some_and(|w| w.is_finished()))
+        {
+            self.session = None;
+            self.last = None;
+        }
         if self.session.as_ref().is_some_and(|s| s.mask != mask) || mask == 0 {
             self.session = None;
             self.attempted = None;
@@ -286,7 +296,7 @@ impl ProcessIo {
             .as_secs_f64()
             .max(0.001);
         // SAFETY: querying our session writes within its owned properties buffer.
-        let valid = unsafe {
+        let queried = unsafe {
             ControlTraceW(
                 session.control,
                 PCWSTR(session.name.as_ptr()),
@@ -294,8 +304,11 @@ impl ProcessIo {
                 EVENT_TRACE_CONTROL_QUERY,
             )
             .0 == 0
-                && (*session.props.as_ptr().cast::<EVENT_TRACE_PROPERTIES>()).EventsLost == 0
         };
+        // A lost event invalidates this interval, rather than every future sample.
+        let lost = unsafe { (*session.props.as_ptr().cast::<EVENT_TRACE_PROPERTIES>()).EventsLost };
+        let valid = queried && lost == session.lost;
+        session.lost = lost;
         if let Ok(mut counts) = session.counts.lock() {
             if valid {
                 for proc in procs {

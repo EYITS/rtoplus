@@ -392,6 +392,21 @@ pub(crate) fn rate(value: Option<f64>) -> String {
 }
 
 fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
+    use crate::collect::process_display::ProcSort;
+    let label = |text: &str, sort| {
+        if params.view.proc_sorting == sort {
+            format!(
+                "{text}{}",
+                if params.view.proc_reversed {
+                    "▼"
+                } else {
+                    "▲"
+                }
+            )
+        } else {
+            text.to_string()
+        }
+    };
     let columns = Columns::configured(
         canvas.dim.width,
         params.view.proc_gpu,
@@ -399,7 +414,7 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
         params.view.proc_disk,
     );
     let mut row = 0;
-    if canvas.dim.height > 1 {
+    if canvas.dim.height > 1 || params.armed_terminate.is_some() {
         let header = if let Some((name, force)) = params.armed_terminate {
             format!(
                 "{}: {} to confirm",
@@ -412,18 +427,21 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
             format!(
                 " {}",
                 columns.row([
-                    if params.proc_paused {
-                        "Paused"
-                    } else {
-                        "Program"
-                    },
-                    "PID",
-                    "Command",
-                    "CPU%",
-                    "Memory",
-                    "GPU%",
-                    "Net/s",
-                    "Disk/s"
+                    &label(
+                        if params.proc_paused {
+                            "Paused"
+                        } else {
+                            "Program"
+                        },
+                        ProcSort::Name
+                    ),
+                    &label("PID", ProcSort::Pid),
+                    &label("Command", ProcSort::Command),
+                    &label("C", ProcSort::Cpu),
+                    &label("Mem", ProcSort::Memory),
+                    &label("GPU", ProcSort::Gpu),
+                    &label("Net", ProcSort::Net),
+                    &label("Disk", ProcSort::Disk)
                 ])
             )
         };
@@ -474,6 +492,7 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
             .group
             .as_ref()
             .map(|group| format!("{} processes", group.count));
+        let [gpu, net, disk] = entry.resource_usage(proc);
         let text = format!(
             "{}{}",
             if selected {
@@ -489,13 +508,10 @@ fn processes(canvas: &mut Canvas<'_>, params: &RenderParams<'_>) {
                 command.as_deref().unwrap_or(&proc.cmd),
                 &cpu,
                 &memory,
-                &entry
-                    .gpu_override
-                    .or(proc.gpu_p)
-                    .map(|v| format!("{v:.1}"))
+                &gpu.map(|v| format!("{v:.1}"))
                     .unwrap_or_else(|| "--".into()),
-                &rate(entry.net_override.or(proc.net_bps)),
-                &rate(entry.disk_override.or(proc.disk_bps))
+                &rate(net),
+                &rate(disk)
             ])
         );
         let color = if selected {

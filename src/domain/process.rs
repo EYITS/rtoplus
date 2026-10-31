@@ -114,6 +114,15 @@ pub struct ProcDisplayEntry {
 }
 
 impl ProcDisplayEntry {
+    /// Unknown group totals must not fall back to one member's measurement.
+    pub(crate) fn resource_usage(&self, proc: &ProcInfo) -> [Option<f64>; 3] {
+        if self.group.is_some() {
+            [self.gpu_override, self.net_override, self.disk_override]
+        } else {
+            [proc.gpu_p, proc.net_bps, proc.disk_bps]
+        }
+    }
+
     pub fn flat(proc_index: usize) -> Self {
         Self {
             proc_index,
@@ -212,9 +221,16 @@ mod tests {
     fn synthetic_group_cannot_resolve_an_actionable_process() {
         let procs = [ProcInfo {
             pid: 42,
+            gpu_p: Some(10.0),
+            net_bps: Some(20.0),
+            disk_bps: Some(30.0),
             ..Default::default()
         }];
         let mut entry = ProcDisplayEntry::flat(0);
+        assert_eq!(
+            entry.resource_usage(&procs[0]),
+            [Some(10.0), Some(20.0), Some(30.0)]
+        );
         assert_eq!(entry.process(&procs).unwrap().pid, 42);
         entry.group = Some(ProcGroupSummary {
             key: AppGroupKey::Executable(Arc::from("c:\\app.exe")),
@@ -223,6 +239,7 @@ mod tests {
             expanded: false,
         });
         assert!(entry.process(&procs).is_none());
+        assert_eq!(entry.resource_usage(&procs[0]), [None, None, None]);
     }
 
     #[test]

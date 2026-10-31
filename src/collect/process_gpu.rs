@@ -61,7 +61,7 @@ impl ProcessGpu {
         if !ENABLED.load(Ordering::Relaxed) {
             self.query = None;
             self.attempted = None;
-            self.buffer.clear();
+            self.buffer = Vec::new();
             return;
         }
         if self.query.is_none() {

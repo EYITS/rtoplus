@@ -173,6 +173,9 @@ impl SortState {
             "command" => self.sort_by == ProcSort::Command,
             "cpu" => matches!(self.sort_by, ProcSort::Cpu),
             "mem" | "memory" => self.sort_by == ProcSort::Memory,
+            "gpu" => self.sort_by == ProcSort::Gpu,
+            "net" => self.sort_by == ProcSort::Net,
+            "disk" => self.sort_by == ProcSort::Disk,
             _ => false,
         }
     }

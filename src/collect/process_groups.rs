@@ -82,7 +82,7 @@ impl Group {
         self.cpu += proc.cpu_p;
         self.net = self.net.zip(proc.net_bps).map(|(a, b)| a + b);
         self.disk = self.disk.zip(proc.disk_bps).map(|(a, b)| a + b);
-        self.gpu_available |= proc.gpu_p.is_some();
+        self.gpu_available &= proc.gpu_p.is_some();
         for (engine, value) in &proc.gpu_engines {
             *self.gpu.entry(engine.clone()).or_default() += value;
         }
