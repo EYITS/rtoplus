@@ -959,8 +959,17 @@ mod tests {
             .expect("spawning a suspended child must succeed");
         let pid = child.id();
 
-        let suspended = collect_suspended_pids();
-        let found = suspended.contains(&pid);
+        // Kernel thread wait-state publication can lag process creation under load.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        let found = loop {
+            if collect_suspended_pids().contains(&pid) {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
 
         // Terminate before asserting so a failure cannot leak the
         // suspended child, which would never exit on its own.

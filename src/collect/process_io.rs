@@ -312,6 +312,60 @@ impl ProcessIo {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "Requires elevated Windows kernel tracing"]
+    fn elevated_network_and_disk_events_are_attributed_to_the_issuing_process() {
+        use std::{io::Write, net::UdpSocket, os::windows::fs::OpenOptionsExt};
+        let session = Session::start(3).expect("elevated kernel ETW session must start");
+        std::thread::sleep(Duration::from_millis(300));
+        let receive = UdpSocket::bind("127.0.0.1:0").unwrap();
+        receive
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let send = UdpSocket::bind("127.0.0.1:0").unwrap();
+        send.send_to(&[42u8; 1024], receive.local_addr().unwrap())
+            .unwrap();
+        receive.recv_from(&mut [0u8; 2048]).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "rtop-etw-test-{}-{}.tmp",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        let temp = Temp(path);
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .custom_flags(0x80000000)
+            .open(&temp.0)
+            .unwrap();
+        file.write_all(&vec![0u8; 4 * 1024 * 1024]).unwrap();
+        file.sync_all().unwrap();
+        let pid = std::process::id();
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(200));
+            let counts = session.counts.lock().unwrap();
+            if counts.net.get(&pid).copied().unwrap_or(0) >= 1024
+                && counts.disk.get(&pid).copied().unwrap_or(0) > 0
+            {
+                return;
+            }
+        }
+        let counts = session.counts.lock().unwrap();
+        panic!(
+            "ETW attribution missing: network={:?}, disk={:?}",
+            counts.net.get(&pid),
+            counts.disk.get(&pid)
+        );
+    }
+    #[test]
     fn network_callback_counts_bytes_for_payload_pid_and_ignores_other_events() {
         let counts = Mutex::new(Counts::default());
         let mut payload = [0u8; 8];

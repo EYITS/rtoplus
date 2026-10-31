@@ -942,6 +942,46 @@ impl ProcessViewState {
         self.entries.get(self.selected)?.process(&snapshot.procs)
     }
 
+    pub(crate) fn group_kill_confirmation(
+        &mut self,
+        group: &crate::domain::process::ProcGroupSummary,
+        live: &LiveData,
+    ) -> Option<Vec<(u32, u64)>> {
+        if let Some((key, members)) = self
+            .armed_group
+            .take()
+            .filter(|_| self.armed_terminate.is_some())
+        {
+            self.armed_terminate = None;
+            return Some(if key == group.key {
+                members
+                    .into_iter()
+                    .filter(|(pid, start)| {
+                        *start != 0
+                            && live.proc_data.as_ref().is_some_and(|s| {
+                                s.procs
+                                    .iter()
+                                    .any(|p| p.pid == *pid && p.started_at == *start)
+                            })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            });
+        }
+        let members = crate::collect::process_groups::members(
+            self.procs_source(live).unwrap_or(&[]),
+            &group.key,
+        );
+        self.armed_terminate = Some((
+            0,
+            format!("{} ({} processes)", group.name, members.len()),
+            true,
+        ));
+        self.armed_group = Some((group.key.clone(), members));
+        None
+    }
+
     pub(crate) fn arm_termination(&mut self, force: bool) {
         let Some(proc) = self.selected_process() else {
             return;
@@ -1335,6 +1375,40 @@ mod tests {
                 .collect(),
             status: crate::collect::CollectStatus::Ok,
         })
+    }
+
+    #[test]
+    fn group_force_confirmation_excludes_new_members_recycled_pids_and_other_groups() {
+        let mut config = config::Config::new();
+        config.view.proc_grouped = true;
+        let mut state = AppState::new(&config);
+        state.live.proc_data = Some(grouped_snapshot(&[(1, "app", 1.0), (2, "app", 2.0)]));
+        state
+            .process
+            .rebuild_entries(&config, &state.view, &state.live);
+        let group = state.process.entries[0].group.clone().unwrap();
+        assert!(
+            state
+                .process
+                .group_kill_confirmation(&group, &state.live)
+                .is_none()
+        );
+        let mut next = grouped_snapshot(&[(1, "app", 1.0), (2, "app", 2.0), (3, "app", 3.0)]);
+        Arc::make_mut(&mut next).procs[0].started_at = 999;
+        state.live.proc_data = Some(next);
+        assert_eq!(
+            state.process.group_kill_confirmation(&group, &state.live),
+            Some(vec![(2, 2)])
+        );
+        state.process.group_kill_confirmation(&group, &state.live);
+        let mut different = group.clone();
+        different.key = AppGroupKey::Executable(Arc::from("other.exe"));
+        assert_eq!(
+            state
+                .process
+                .group_kill_confirmation(&different, &state.live),
+            Some(Vec::new())
+        );
     }
 
     #[test]

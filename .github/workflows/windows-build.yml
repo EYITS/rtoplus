@@ -52,7 +52,12 @@ jobs:
       - name: Test
         run: cargo test --locked --target x86_64-pc-windows-msvc
 
-      - name: Build executable
+      - name: Test elevated process network and disk tracing
+        # Hosted Windows runners are elevated; ordinary cargo test skips this check.
+        # It creates only loopback UDP traffic and a disposable test file.
+        run: cargo test --locked --target x86_64-pc-windows-msvc elevated_network_and_disk_events -- --ignored --nocapture
+
+      - name: Build executable release
         run: cargo build --locked --release --target x86_64-pc-windows-msvc
 
       - name: Smoke test and checksum

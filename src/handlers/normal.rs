@@ -413,37 +413,10 @@ fn group_kill_action(ctx: &mut InputContext<'_>) -> bool {
         }
         return false;
     };
-    if let Some((key, members)) = ctx
-        .process
-        .armed_group
-        .take()
-        .filter(|_| ctx.process.armed_terminate.is_some())
-    {
-        ctx.process.armed_terminate = None;
-        if key == group.key {
-            for (pid, started) in members {
-                if started != 0
-                    && ctx.live.proc_data.as_ref().is_some_and(|s| {
-                        s.procs
-                            .iter()
-                            .any(|p| p.pid == pid && p.started_at == started)
-                    })
-                {
-                    kill_identity(pid, started);
-                }
-            }
+    if let Some(members) = ctx.process.group_kill_confirmation(&group, ctx.live) {
+        for (pid, start) in members {
+            kill_identity(pid, start);
         }
-    } else {
-        let members = crate::collect::process_groups::members(
-            ctx.process.procs_source(ctx.live).unwrap_or(&[]),
-            &group.key,
-        );
-        ctx.process.armed_terminate = Some((
-            0,
-            format!("{} ({} processes)", group.name, members.len()),
-            true,
-        ));
-        ctx.process.armed_group = Some((group.key, members));
     }
     ctx.render.dirty.mark_proc_widget();
     true

@@ -308,10 +308,10 @@ fn draw_header(
         buf.text("   GPU%");
     }
     if settings.proc_net {
-        buf.text("    Net/s");
+        buf.text(" ").text(&crate::tools::rjust("Net/s", 7, true));
     }
     if settings.proc_disk {
-        buf.text("   Disk/s");
+        buf.text(" ").text(&crate::tools::rjust("Disk/s", 7, true));
     }
     buf.reset();
 }
