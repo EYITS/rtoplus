@@ -98,7 +98,8 @@ impl Session {
         unsafe {
             let p = &mut *props.as_mut_ptr().cast::<EVENT_TRACE_PROPERTIES>();
             p.Wnode.BufferSize = bytes as u32;
-            p.Wnode.Guid = SystemTraceControlGuid;
+            // A zero GUID lets ETW allocate a session identity. SystemTraceControlGuid
+            // is reserved for the shared NT Kernel Logger and rejects our own name.
             p.Wnode.Flags = 0x20000;
             p.Wnode.ClientContext = 1;
             p.BufferSize = 64;
@@ -125,6 +126,8 @@ impl Session {
                 props.as_mut_ptr().cast(),
             );
             if error.0 != 0 {
+                #[cfg(test)]
+                eprintln!("StartTraceW failed: {}", error.0);
                 tracing::debug!(
                     code = error.0,
                     "Process I/O tracing unavailable; run elevated"
@@ -144,6 +147,10 @@ impl Session {
         // SAFETY: callbacks reference counts, held by Session and the worker until join.
         let trace = unsafe { OpenTraceW(&mut logfile) };
         if trace.Value == u64::MAX {
+            #[cfg(test)]
+            eprintln!("OpenTraceW failed: {:?}", unsafe {
+                windows::Win32::Foundation::GetLastError()
+            });
             // SAFETY: this session was started above and belongs exclusively to us.
             unsafe {
                 let _ = ControlTraceW(

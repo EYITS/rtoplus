@@ -26,8 +26,25 @@ kaynak sürümünün commit kimliği Actions çalıştırma özetinde gösterili
 - **e:** Mevcut Tree View görünümü.
 - **Sol/sağ:** Sıralama sütununu değiştir; **r:** Sıralamayı tersine çevir.
 - **f** veya **/**: Filtre. Üyelerden biri eşleşirse grubun tamamı görünür.
-- **t / Shift+T:** Mevcut çift basış güvenliğiyle tekil işlemi sonlandır/öldür.
-  Grup satırlarında bu işlemler uygulanmaz.
+- **t:** Mevcut çift basış güvenliğiyle tekil işlemi sonlandır.
+- **Shift+T, Shift+T:** Grup satırında ilk basış onay ister; ikinci basış,
+  o anda grupta bulunan işlemleri zorla kapatır. Yeni katılan PID'ler bu
+  onaya dahil edilmez. Başka bir tuş onayı iptal eder.
+- **Shift+U:** GPU yüzdesini aç/kapat; GPU açıkken PID gizlenir.
+- **Shift+N:** İşlem/grup başına ağ gönderme+alma hızını aç/kapat.
+- **Shift+D:** İşlem/grup başına disk okuma+yazma hızını aç/kapat.
+- **Sol/sağ:** Açık sütunlara göre sıralama; **r:** Sıralama yönü.
+
+GPU, RAM'in sağında görünür. Ağ ve disk hızları byte/s olarak, kısa birimlerle
+gösterilir. Üç ayar Options → proc menüsünden ve `proc_gpu`, `proc_net`,
+`proc_disk` anahtarlarından bağımsız kaydedilir. Dar pencerelerde ikincil
+sütunlar geçici gizlenebilir.
+
+Ağ ve diski doğru ayırmak için yönetici olarak çalıştırmak gerekir. Kalıcı
+hizmet kurulmaz; normal açılışta erişilemeyen ölçümler `--` görünür. GPU için
+yönetici şartı yoktur; desteklenen WDDM sayaçları gerekir. Ağ sütunu yalnız
+internet değil LAN dahil TCP/UDP trafiğini gösterir. Disk fiziksel aktarımdır;
+Windows önbelleğinden karşılanan okumalar fiziksel disk trafiği sayılmaz.
 
 Kalıcı ayar **Options → proc → proc_grouped** üzerinden veya
 `%APPDATA%\rtop\rtop.toml` içinde değiştirilebilir:
