@@ -33,8 +33,25 @@ struct Group {
     cpu: f64,
     memory: u64,
     threads: usize,
+    gpu: HashMap<String, f64>,
+    gpu_available: bool,
+    net: Option<f64>,
+    disk: Option<f64>,
     matches: bool,
     followed: bool,
+}
+
+fn gpu_total(group: &Group) -> f64 {
+    if group.gpu_available {
+        group
+            .gpu
+            .values()
+            .copied()
+            .fold(0.0, f64::max)
+            .clamp(0.0, 100.0)
+    } else {
+        -1.0
+    }
 }
 
 impl Group {
@@ -46,6 +63,10 @@ impl Group {
             cpu: proc.cpu_p,
             memory: proc.mem,
             threads: proc.threads,
+            gpu: proc.gpu_engines.iter().cloned().collect(),
+            gpu_available: proc.gpu_p.is_some(),
+            net: proc.net_bps,
+            disk: proc.disk_bps,
             matches,
             followed: followed_pid != 0 && proc.pid == followed_pid,
         }
@@ -59,6 +80,12 @@ impl Group {
         let proc = &procs[index];
         self.others.push(index);
         self.cpu += proc.cpu_p;
+        self.net = self.net.zip(proc.net_bps).map(|(a, b)| a + b);
+        self.disk = self.disk.zip(proc.disk_bps).map(|(a, b)| a + b);
+        self.gpu_available |= proc.gpu_p.is_some();
+        for (engine, value) in &proc.gpu_engines {
+            *self.gpu.entry(engine.clone()).or_default() += value;
+        }
         self.memory = self.memory.saturating_add(proc.mem);
         self.threads = self.threads.saturating_add(proc.threads);
         self.matches |= matches;
@@ -105,6 +132,9 @@ pub fn build_grouped_proc_display_entries(
         .collect();
     groups.sort_unstable_by(|(_, a), (_, b)| {
         let cmp = match sort_by {
+            ProcSort::Gpu => gpu_total(a).total_cmp(&gpu_total(b)),
+            ProcSort::Net => a.net.unwrap_or(-1.0).total_cmp(&b.net.unwrap_or(-1.0)),
+            ProcSort::Disk => a.disk.unwrap_or(-1.0).total_cmp(&b.disk.unwrap_or(-1.0)),
             ProcSort::Cpu => a
                 .cpu
                 .partial_cmp(&b.cpu)
@@ -138,6 +168,16 @@ pub fn build_grouped_proc_display_entries(
             depth: 0,
             cpu_override: Some(group.cpu),
             mem_override: Some(group.memory),
+            net_override: group.net,
+            disk_override: group.disk,
+            gpu_override: group.gpu_available.then(|| {
+                group
+                    .gpu
+                    .values()
+                    .copied()
+                    .fold(0.0_f64, f64::max)
+                    .clamp(0.0, 100.0)
+            }),
             group: Some(ProcGroupSummary {
                 key,
                 count: group.count(),
@@ -156,6 +196,16 @@ pub fn build_grouped_proc_display_entries(
     entries
 }
 
+pub(crate) fn members(procs: &[ProcInfo], key: &AppGroupKey) -> Vec<(u32, u64)> {
+    let indices = procs.iter().enumerate().map(|(i, p)| (p.pid, i)).collect();
+    procs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| application_key(*i, procs, &indices) == *key)
+        .map(|(_, p)| (p.pid, p.started_at))
+        .collect()
+}
+
 fn application_name(name: &str) -> String {
     match name.rsplit_once('.') {
         Some((base, extension)) if !base.is_empty() && extension.eq_ignore_ascii_case("exe") => {
@@ -172,7 +222,7 @@ fn lineage_key(proc: &ProcInfo) -> AppGroupKey {
     }
 }
 
-fn application_key(
+pub(super) fn application_key(
     origin: usize,
     procs: &[ProcInfo],
     pid_indices: &HashMap<u32, usize>,
@@ -205,6 +255,42 @@ fn application_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_metrics_aggregate_and_sort_by_complete_application() {
+        let mut a = proc(1, "C:/a.exe", "a.exe", 1.0, 1);
+        a.gpu_p = Some(20.0);
+        a.gpu_engines = vec![("engine0".into(), 20.0)];
+        a.net_bps = Some(10.0);
+        a.disk_bps = Some(30.0);
+        let mut b = a.clone();
+        b.pid = 2;
+        b.started_at = 2;
+        b.gpu_engines = vec![("engine0".into(), 25.0), ("engine1".into(), 5.0)];
+        b.net_bps = Some(20.0);
+        let mut c = proc(3, "C:/c.exe", "c.exe", 2.0, 2);
+        c.gpu_p = Some(35.0);
+        c.gpu_engines = vec![("engine0".into(), 35.0)];
+        c.net_bps = Some(25.0);
+        c.disk_bps = Some(50.0);
+        let procs = vec![a, b, c];
+        for sorting in [ProcSort::Gpu, ProcSort::Net, ProcSort::Disk] {
+            let entries = build_grouped_proc_display_entries(
+                &procs,
+                sorting,
+                true,
+                "",
+                &mut HashSet::new(),
+                0,
+            );
+            assert_eq!(entries[0].group.as_ref().unwrap().name, "a");
+            assert_eq!(entries[0].gpu_override, Some(45.0));
+            assert_eq!(entries[0].net_override, Some(30.0));
+            assert_eq!(entries[0].disk_override, Some(60.0));
+        }
+        let key = AppGroupKey::Executable(normalize_executable_path("C:/a.exe"));
+        assert_eq!(members(&procs, &key), vec![(1, 1), (2, 2)]);
+    }
 
     fn proc(pid: u32, path: &str, name: &str, cpu: f64, mem: u64) -> ProcInfo {
         ProcInfo {

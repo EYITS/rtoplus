@@ -263,7 +263,25 @@ fn cycle_sort(ctx: &mut InputContext, dir: isize) {
     } else {
         (idx + 1) % ProcSort::ALL.len()
     };
-    ctx.view.proc_sorting = ProcSort::ALL[new_idx];
+    let mut target = new_idx;
+    for _ in 0..ProcSort::ALL.len() {
+        let visible = match ProcSort::ALL[target] {
+            ProcSort::Gpu => ctx.view.proc_gpu,
+            ProcSort::Net => ctx.view.proc_net,
+            ProcSort::Disk => ctx.view.proc_disk,
+            ProcSort::Pid => !ctx.view.proc_gpu,
+            _ => true,
+        };
+        if visible {
+            break;
+        }
+        target = if dir < 0 {
+            (target + ProcSort::ALL.len() - 1) % ProcSort::ALL.len()
+        } else {
+            (target + 1) % ProcSort::ALL.len()
+        };
+    }
+    ctx.view.proc_sorting = ProcSort::ALL[target];
     ctx.render.dirty.mark_proc_data_changed();
 }
 
@@ -315,7 +333,32 @@ pub(super) fn terminate_action(ctx: &mut InputContext, _: &Key) {
     ctx.render.dirty.mark_proc_widget();
 }
 
+pub(super) fn toggle_proc_net_action(ctx: &mut InputContext, _: &Key) {
+    ctx.view.proc_net = !ctx.view.proc_net;
+    if !ctx.view.proc_net && ctx.view.proc_sorting == ProcSort::Net {
+        ctx.view.proc_sorting = ProcSort::Cpu;
+    }
+    ctx.render.dirty.mark_proc_data_changed();
+}
+pub(super) fn toggle_proc_disk_action(ctx: &mut InputContext, _: &Key) {
+    ctx.view.proc_disk = !ctx.view.proc_disk;
+    if !ctx.view.proc_disk && ctx.view.proc_sorting == ProcSort::Disk {
+        ctx.view.proc_sorting = ProcSort::Cpu;
+    }
+    ctx.render.dirty.mark_proc_data_changed();
+}
+pub(super) fn toggle_proc_gpu_action(ctx: &mut InputContext, _: &Key) {
+    ctx.view.proc_gpu = !ctx.view.proc_gpu;
+    if !ctx.view.proc_gpu && ctx.view.proc_sorting == ProcSort::Gpu {
+        ctx.view.proc_sorting = ProcSort::Cpu;
+    }
+    ctx.render.dirty.mark_proc_data_changed();
+}
+
 pub(super) fn kill_action(ctx: &mut InputContext, _: &Key) {
+    if group_kill_action(ctx) {
+        return;
+    }
     if !termination_selection_is_valid(ctx) {
         return;
     }
@@ -356,6 +399,88 @@ pub(super) fn kill_action(ctx: &mut InputContext, _: &Key) {
 
 /// Confirmation must still refer to the explicitly selected individual PID.
 /// A snapshot can move rows between the two key presses without a navigation key.
+fn group_kill_action(ctx: &mut InputContext<'_>) -> bool {
+    let group = ctx
+        .process
+        .entries
+        .get(ctx.process.selected)
+        .and_then(|e| e.group.as_ref())
+        .cloned();
+    let Some(group) = group else {
+        if ctx.process.armed_group.take().is_some() {
+            ctx.process.armed_terminate = None;
+            return true;
+        }
+        return false;
+    };
+    if let Some((key, members)) = ctx
+        .process
+        .armed_group
+        .take()
+        .filter(|_| ctx.process.armed_terminate.is_some())
+    {
+        ctx.process.armed_terminate = None;
+        if key == group.key {
+            for (pid, started) in members {
+                if started != 0
+                    && ctx.live.proc_data.as_ref().is_some_and(|s| {
+                        s.procs
+                            .iter()
+                            .any(|p| p.pid == pid && p.started_at == started)
+                    })
+                {
+                    kill_identity(pid, started);
+                }
+            }
+        }
+    } else {
+        let members = crate::collect::process_groups::members(
+            ctx.process.procs_source(ctx.live).unwrap_or(&[]),
+            &group.key,
+        );
+        ctx.process.armed_terminate = Some((
+            0,
+            format!("{} ({} processes)", group.name, members.len()),
+            true,
+        ));
+        ctx.process.armed_group = Some((group.key, members));
+    }
+    ctx.render.dirty.mark_proc_widget();
+    true
+}
+
+fn kill_identity(pid: u32, started: u64) {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::*;
+    // SAFETY: the owned handle pins the process identity across validation and kill.
+    unsafe {
+        if let Some(h) = OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        )
+        .ok()
+        .and_then(crate::collect::win::OwnedHandle::new)
+        {
+            let (mut creation, mut exit, mut kernel, mut user) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            if GetProcessTimes(h.get(), &mut creation, &mut exit, &mut kernel, &mut user).is_ok()
+                && ((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
+                    == started
+                && let Err(error) = TerminateProcess(h.get(), 1)
+            {
+                tracing::warn!(pid, %error, "group kill failed");
+            }
+        } else {
+            tracing::warn!(pid, "group kill access denied or process exited");
+        }
+    }
+}
+
 fn termination_selection_is_valid(ctx: &mut InputContext<'_>) -> bool {
     if ctx.process.termination_target(ctx.live).is_none() {
         ctx.process.armed_terminate = None;
@@ -686,5 +811,50 @@ fn terminate_process(pid: u32) {
                 "OpenProcess failed",
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod group_kill_tests {
+    use super::*;
+    #[test]
+    fn checked_force_kill_refuses_reused_identity_and_kills_only_own_child() {
+        use std::process::{Command, Stdio};
+        use windows::Win32::{Foundation::FILETIME, System::Threading::*};
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(
+            Command::new("cmd.exe")
+                .args(["/d", "/q", "/k"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        // SAFETY: query only our freshly spawned child using an owned handle.
+        let started = unsafe {
+            let h = crate::collect::win::OwnedHandle::new(
+                OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, child.0.id()).unwrap(),
+            )
+            .unwrap();
+            let (mut a, mut b, mut c, mut d) = (
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+                FILETIME::default(),
+            );
+            GetProcessTimes(h.get(), &mut a, &mut b, &mut c, &mut d).unwrap();
+            (u64::from(a.dwHighDateTime) << 32) | u64::from(a.dwLowDateTime)
+        };
+        kill_identity(child.0.id(), started + 1);
+        assert!(child.0.try_wait().unwrap().is_none());
+        kill_identity(child.0.id(), started);
+        assert!(!child.0.wait().unwrap().success());
     }
 }

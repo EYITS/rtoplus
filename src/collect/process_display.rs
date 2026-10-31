@@ -11,6 +11,9 @@ pub struct ParseProcSortError(pub String);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ProcSort {
+    Gpu,
+    Net,
+    Disk,
     Pid,
     Name,
     Command,
@@ -23,6 +26,9 @@ pub enum ProcSort {
 
 impl ProcSort {
     pub const ALL: &'static [ProcSort] = &[
+        ProcSort::Gpu,
+        ProcSort::Net,
+        ProcSort::Disk,
         ProcSort::Pid,
         ProcSort::Name,
         ProcSort::Command,
@@ -32,11 +38,15 @@ impl ProcSort {
         ProcSort::Cpu,
     ];
 
-    pub const NAMES: &'static [&'static str] =
-        &["pid", "name", "command", "threads", "user", "memory", "cpu"];
+    pub const NAMES: &'static [&'static str] = &[
+        "gpu", "net", "disk", "pid", "name", "command", "threads", "user", "memory", "cpu",
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
+            ProcSort::Gpu => "gpu",
+            ProcSort::Net => "net",
+            ProcSort::Disk => "disk",
             ProcSort::Pid => "pid",
             ProcSort::Name => "name",
             ProcSort::Command => "command",
@@ -299,6 +309,15 @@ fn aggregate_tree_entries(
 
 pub(super) fn compare_procs(a: &ProcInfo, b: &ProcInfo, sort_by: ProcSort) -> std::cmp::Ordering {
     match sort_by {
+        ProcSort::Gpu => a.gpu_p.unwrap_or(-1.0).total_cmp(&b.gpu_p.unwrap_or(-1.0)),
+        ProcSort::Net => a
+            .net_bps
+            .unwrap_or(-1.0)
+            .total_cmp(&b.net_bps.unwrap_or(-1.0)),
+        ProcSort::Disk => a
+            .disk_bps
+            .unwrap_or(-1.0)
+            .total_cmp(&b.disk_bps.unwrap_or(-1.0)),
         ProcSort::Pid => a.pid.cmp(&b.pid),
         ProcSort::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
         ProcSort::Command => a.cmd.to_lowercase().cmp(&b.cmd.to_lowercase()),

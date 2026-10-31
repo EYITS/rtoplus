@@ -194,6 +194,9 @@ impl GpuViewState {
 pub(crate) struct RuntimeView {
     pub(crate) proc_tree: bool,
     pub(crate) proc_grouped: bool,
+    pub(crate) proc_gpu: bool,
+    pub(crate) proc_disk: bool,
+    pub(crate) proc_net: bool,
     pub(crate) proc_reversed: bool,
     pub(crate) proc_per_core: bool,
     pub(crate) proc_sorting: crate::collect::process_display::ProcSort,
@@ -212,6 +215,9 @@ impl RuntimeView {
         Self {
             proc_tree: view.proc_tree && !view.proc_grouped,
             proc_grouped: view.proc_grouped,
+            proc_gpu: view.proc_gpu,
+            proc_disk: view.proc_disk,
+            proc_net: view.proc_net,
             proc_reversed: view.proc_reversed,
             proc_per_core: view.proc_per_core,
             proc_sorting: view.proc_sorting,
@@ -230,6 +236,9 @@ impl RuntimeView {
     pub(crate) fn sync_to_config(&self, view: &mut crate::config::ViewConfig) {
         view.proc_tree = self.proc_tree;
         view.proc_grouped = self.proc_grouped;
+        view.proc_gpu = self.proc_gpu;
+        view.proc_disk = self.proc_disk;
+        view.proc_net = self.proc_net;
         view.proc_reversed = self.proc_reversed;
         view.proc_per_core = self.proc_per_core;
         view.proc_sorting = self.proc_sorting;
@@ -246,6 +255,9 @@ impl RuntimeView {
     pub(crate) fn sync_from_config(&mut self, view: &crate::config::ViewConfig) {
         self.proc_tree = view.proc_tree && !view.proc_grouped;
         self.proc_grouped = view.proc_grouped;
+        self.proc_gpu = view.proc_gpu;
+        self.proc_disk = view.proc_disk;
+        self.proc_net = view.proc_net;
         self.proc_reversed = view.proc_reversed;
         self.proc_per_core = view.proc_per_core;
         self.proc_sorting = view.proc_sorting;
@@ -820,6 +832,7 @@ pub(crate) struct ProcessViewState {
     /// Armed terminate state: (pid, process_name, force_kill).
     /// Set on first `t`/`T`, cleared on second press or any other key.
     pub(crate) armed_terminate: Option<(u32, String, bool)>,
+    pub(crate) armed_group: Option<(AppGroupKey, Vec<(u32, u64)>)>,
     /// Creation time captured on the first confirmation press, preventing a
     /// recycled PID from inheriting an armed termination after a refresh.
     armed_started_at: Option<u64>,
@@ -869,7 +882,7 @@ pub(crate) struct ProcessViewState {
 #[derive(Debug, Clone)]
 pub(crate) enum DetailPanel {
     Closed,
-    Open(OpenDetail),
+    Open(Box<OpenDetail>),
 }
 
 /// Inner state for [`DetailPanel::Open`].
@@ -916,6 +929,7 @@ impl ProcessViewState {
             expanded_groups: HashSet::new(),
             display_snapshot: None,
             armed_terminate: None,
+            armed_group: None,
             armed_started_at: None,
             pause: None,
         }
@@ -969,10 +983,10 @@ impl ProcessViewState {
     /// open-detail path total — no `expect`, no `Option` shuffle.
     pub(crate) fn open_detail(&mut self, info: ProcInfo) {
         let pid = info.pid;
-        self.detail = DetailPanel::Open(OpenDetail {
+        self.detail = DetailPanel::Open(Box::new(OpenDetail {
             pid,
             last_seen: info,
-        });
+        }));
     }
 
     /// Close the detail panel. No-op when already closed.

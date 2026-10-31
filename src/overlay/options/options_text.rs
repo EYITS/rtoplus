@@ -49,6 +49,21 @@ pub fn desc(key: ConfigKey) -> &'static [&'static str] {
             "",
             "Default: off.",
         ],
+        ConfigKey::Bool(BoolKey::ProcNet) => &[
+            "Per-process TCP/UDP network bytes/s.",
+            "Requires elevated kernel tracing.",
+            "Unavailable measurements display --.",
+        ],
+        ConfigKey::Bool(BoolKey::ProcDisk) => &[
+            "Per-process physical disk bytes/s.",
+            "Requires elevated kernel tracing.",
+            "Unavailable measurements display --.",
+        ],
+        ConfigKey::Bool(BoolKey::ProcGpu) => &[
+            "Process GPU utilization (U).",
+            "Replaces PID with GPU after memory.",
+            "Unavailable counters display --.",
+        ],
         ConfigKey::Bool(BoolKey::ProcGrouped) => &[
             "Group processes by application.",
             "",

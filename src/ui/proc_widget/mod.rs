@@ -39,6 +39,9 @@ pub struct ProcFrame {
     pub total_mem: u64,
     pub proc_colors: bool,
     pub base_10: bool,
+    pub proc_gpu: bool,
+    pub proc_net: bool,
+    pub proc_disk: bool,
 }
 
 /// Draw the process list widget with a sort indicator on the active column.
@@ -52,7 +55,13 @@ pub fn draw(
     status: &CollectStatus,
 ) -> String {
     let colors = ProcColors::from_theme(theme, settings);
-    let layout = ProcWidgetLayout::calculate(area, view);
+    let mut layout = ProcWidgetLayout::calculate(area, view);
+    if settings.proc_gpu {
+        layout.columns = layout::ProcColumns::with_gpu(layout.inner_w, view.tree_mode);
+    }
+    layout
+        .columns
+        .extra_metrics(settings.proc_net, settings.proc_disk);
     let mut buf = AnsiBuffer::new();
 
     draw_frame(&mut buf, area, &colors, status);
@@ -233,18 +242,20 @@ fn draw_header(
 
     let mut col_x = layout.x + 3;
 
-    let pid_str = format!("{:<pid_w$}", pid_label, pid_w = columns.pid_w);
-    let pid_color = if sort.is_sort("pid") {
-        colors.hi
-    } else {
-        colors.title_color
-    };
-    buf.mv(col_x, layout.header_y)
-        .color(pid_color)
-        .text(&pid_str);
-    col_x += columns.pid_w + 1;
+    if columns.pid_w > 0 {
+        let pid_str = format!("{:<pid_w$}", pid_label, pid_w = columns.pid_w);
+        let pid_color = if sort.is_sort("pid") {
+            colors.hi
+        } else {
+            colors.title_color
+        };
+        buf.mv(col_x, layout.header_y)
+            .color(pid_color)
+            .text(&pid_str);
+        col_x += columns.pid_w + 1;
+    }
 
-    let name_str = format!("{:<name_w$}", name_label, name_w = columns.name_w);
+    let name_str = tools_name(&name_label, columns.name_w);
     let name_color = if sort.is_sort("name") {
         colors.hi
     } else {
@@ -292,8 +303,21 @@ fn draw_header(
     };
     buf.mv(col_x, layout.header_y)
         .color(mem_color)
-        .text(&mem_str)
-        .reset();
+        .text(&mem_str);
+    if columns.gpu_w > 0 {
+        buf.text("   GPU%");
+    }
+    if settings.proc_net {
+        buf.text("    Net/s");
+    }
+    if settings.proc_disk {
+        buf.text("   Disk/s");
+    }
+    buf.reset();
+}
+
+fn tools_name(text: &str, width: usize) -> String {
+    crate::tools::ljust(text, width, true)
 }
 
 fn mem_header_label(settings: &ProcFrame) -> &'static str {
@@ -440,6 +464,9 @@ impl super::Widget for ProcWidget {
             total_mem: params.total_mem,
             proc_colors: params.config.proc.proc_colors,
             base_10: params.config.ui.base_10_sizes,
+            proc_gpu: params.view.proc_gpu,
+            proc_net: params.view.proc_net,
+            proc_disk: params.view.proc_disk,
         };
         output.push_str(&draw(
             procs,
@@ -611,6 +638,9 @@ mod tests {
             total_mem: 1024 * 1024 * 1024,
             proc_colors: true,
             base_10: false,
+            proc_gpu: false,
+            proc_net: false,
+            proc_disk: false,
         }
     }
 

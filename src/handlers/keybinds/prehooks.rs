@@ -20,6 +20,7 @@ use super::PrehookOutcome;
 pub(super) fn armed_terminate_disarm(key: &Key, ctx: &mut InputContext) -> PrehookOutcome {
     if ctx.process.armed_terminate.is_some() && !matches!(key, Key::Char('t' | 'T')) {
         ctx.process.armed_terminate = None;
+        ctx.process.armed_group = None;
         ctx.render.dirty.mark_proc_widget();
         return PrehookOutcome::Consume;
     }

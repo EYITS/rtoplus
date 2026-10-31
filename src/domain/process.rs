@@ -30,6 +30,10 @@ pub struct ProcInfo {
     pub mem: u64,
     /// Current CPU usage percentage (may exceed 100% if per-core).
     pub cpu_p: f64,
+    pub gpu_p: Option<f64>,
+    pub net_bps: Option<f64>,
+    pub disk_bps: Option<f64>,
+    pub gpu_engines: Vec<(String, f64)>,
     /// Current process state.
     pub state: ProcState,
     /// Process priority class.
@@ -56,6 +60,10 @@ impl Default for ProcInfo {
             user: String::new(),
             mem: 0,
             cpu_p: 0.0,
+            gpu_p: None,
+            net_bps: None,
+            disk_bps: None,
+            gpu_engines: Vec::new(),
             state: ProcState::Unknown,
             priority: PriorityClass::Normal,
             ppid: 0,
@@ -98,6 +106,9 @@ pub struct ProcDisplayEntry {
     pub cpu_override: Option<f64>,
     /// Aggregated memory override (used when `proc_aggregate` is on in tree mode).
     pub mem_override: Option<u64>,
+    pub gpu_override: Option<f64>,
+    pub net_override: Option<f64>,
+    pub disk_override: Option<f64>,
     /// Present only for a synthetic application row. Such a row has no actionable PID.
     pub group: Option<ProcGroupSummary>,
 }
@@ -110,6 +121,9 @@ impl ProcDisplayEntry {
             depth: 0,
             cpu_override: None,
             mem_override: None,
+            gpu_override: None,
+            net_override: None,
+            disk_override: None,
             group: None,
         }
     }
@@ -121,6 +135,9 @@ impl ProcDisplayEntry {
             depth,
             cpu_override: None,
             mem_override: None,
+            gpu_override: None,
+            net_override: None,
+            disk_override: None,
             group: None,
         }
     }

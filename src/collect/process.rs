@@ -93,6 +93,8 @@ unsafe extern "system" {
 
 /// Process data collector using Windows APIs.
 pub struct ProcCollector {
+    gpu: super::process_gpu::ProcessGpu,
+    io: super::process_io::ProcessIo,
     /// Raw collected process data — never sorted/filtered in place.
     pub procs: Vec<ProcInfo>,
     pub status: super::CollectStatus,
@@ -111,6 +113,8 @@ impl ProcCollector {
     pub fn new() -> Self {
         Self {
             procs: Vec::new(),
+            gpu: super::process_gpu::ProcessGpu::default(),
+            io: super::process_io::ProcessIo::default(),
             status: super::CollectStatus::Ok,
             prev_times: HashMap::new(),
             image_paths: HashMap::new(),
@@ -208,6 +212,10 @@ impl ProcCollector {
                         } else {
                             details.cmd
                         },
+                        gpu_p: None,
+                        net_bps: None,
+                        disk_bps: None,
+                        gpu_engines: Vec::new(),
                         exe_path: details.exe_path,
                         started_at: details.started_at,
                         threads,
@@ -241,6 +249,8 @@ impl ProcCollector {
         self.image_paths
             .retain(|pid, _| self.prev_times.contains_key(pid));
 
+        self.gpu.collect(&mut new_procs);
+        self.io.collect(&mut new_procs);
         self.procs = new_procs;
     }
 }
